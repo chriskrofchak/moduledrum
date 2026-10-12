@@ -121,8 +121,43 @@ why that submodule always shows as modified; `MD patch` markers in the source; o
    together with V on either back end.
 
 These are upstream bugs (dsp56300/dsp56300) and affect Monomodule too; they have not been reported upstream yet.
-The x64 back end carries the same patch but has not been run (no Intel Mac at hand): check `md-hash` under Rosetta or
-on Intel before a universal build.
+
+### The x64 back end (increment 0010: first runs, under Rosetta 2)
+
+`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` builds the plugins, the app and the tools; dsp56300 and asmjit pick the
+JIT back end by compiler macro, so the x86_64 slice runs the x64 JIT, with the same patch. There is no Intel Mac at
+hand; the slice ran under Rosetta on Apple Silicon (`arch -x86_64`). An arm64 CMake's `ctest` cannot be started with
+`arch`, so the tests were started with `-DCMAKE_CROSSCOMPILING_EMULATOR="arch;-x86_64"`, which makes CMake prefix every
+test command. OS 1.63:
+
+- `md-hash`: `hash 04ef1db4fe767721`, also with `MD_GROUPS=2` and `4`.
+- ctest: romart, firmware, golden-hash, kits, jit, resampler, plugin-os-load and plugin-editor pass.
+- **Finding 1 (lockstep).** `MD_JIT_LOCKSTEP=1 md-hash` reports a first difference that the aarch64 JIT does not have:
+  after JIT block 136872 (P:$1038c0 to $1038ca, instruction 5596681) `sr jit=80044 interp=80040`, i.e. Z is set on the
+  x64 JIT. The block is a `DO #$22` loop in one machine's set-up code: per iteration two table words are loaded and
+  each is shifted left by 12 with LSL. All other registers agree and the last shifted values are not zero, so Z should
+  be clear (the interpreter and the aarch64 JIT say so). Cause, from reading the source (not yet confirmed by a run:
+  Rosetta stopped working, see below): `alu_lsl` and `alu_lsr` in `jitops_alu_x64.cpp` open a
+  `CcrBatchUpdate(N | C | V)`, which clears those bits up front and switches `ccr_update()` to OR-only; Z is not in
+  the mask, yet both ops set it with `ccr_update_ifZero(CCRB_Z)`, so an earlier Z = 1 (a zero table word in the loop)
+  is never cleared by a later non-zero result. The fix would be `CCR_Z` in both masks (lines 144 and 168), with a case
+  in `tests/test_jit.cpp` (LSL of zero, then of a non-zero value, compared with the interpreter; the aarch64 versions
+  have no batch). The golden hash is unaffected (the voice program does not read Z there), but lockstep stops at the
+  first difference, so nothing after it has been compared.
+- **Finding 2 (crashes).** `plugin-render` and `plugin-state` (`MdPluginCheck`) died with SIGSEGV, a null dereference
+  in JIT-generated code on the main thread, in the one full ctest run made while the Mac was heavily loaded. They passed
+  in every serial run after (4 of render, 15 of state); with 8 copies running at once, `--check-render` crashed in 21 of
+  24 runs and `--check-state` in 0 of 24. On arm64 nothing crashes, also not with `MallocScribble`. Whether this is a
+  bug in the x64 JIT or Rosetta's handling of self-modifying code (asmjit does not use `MAP_JIT` in a non-hardened
+  x86_64 process, so the JIT memory is plain RWX, which Rosetta has to track) is not settled. An interpreter-only
+  x86_64 build (`-DCMAKE_OSX_ARCHITECTURES=x86_64 -DMD_USE_JIT=OFF`) under the same parallel load separates the two,
+  and an Intel Mac settles it.
+- **Caution.** Do not attach lldb to the x86_64 slice: the session hung (0 % CPU, debugserver under Rosetta), and after
+  it was killed this Mac's Rosetta translator stopped starting binaries it had not seen before (a freshly compiled
+  hello world too: processes stuck in the kernel at exec, state U, which `kill -9` does not end) until `oahd` is
+  restarted (`sudo killall oahd`) or the Mac reboots. Whether the lldb session caused it is not known.
+
+So the x86_64 slice is experimental: the release script builds arm64 unless told `-a universal`, and the README says so.
 
 ## Decisions (made, not to be re-litigated without a reason)
 
@@ -152,6 +187,9 @@ on Intel before a universal build.
   addresses only after checking the ColdFire section's size and hash.
 - **The processor must never take the engine lock from the message thread for display** (the old status line did, and
   the audio thread dropped blocks); the editor reads atomics.
+- **Packaging:** releases are arm64 until the x64 JIT is verified (the universal build exists and is opt-in). The build
+  signs the bundles itself (hardened runtime; the JIT entitlements only stick to the standalone app, plugins run on their
+  host's), the installer installs system-wide (AU, VST3, app), and the `.zip` is made after notarization and stapling.
 - **Voice budget, silence release and voice-group splitting stay off** (not hardware behaviour, or not bit-exact).
 
 ## Repository history and local files
@@ -176,9 +214,15 @@ verification of their claims.
 - **0013 Low CPU.** Targets: an idle instance under 0.5 % of a core, a typical beat under 5 %. The big lever is an
   exact whole-engine idle skip (the engine already skips settled tracks' effects and idle voices in the DSP loop; when
   everything has settled the block is zeros), then the resampler cost, the editor repaint rate, and memory.
-- **0010 Packaging.** Ninja builds are only ad-hoc signed; JUCE writes the entitlements file but does not apply it.
-  Packaging must run `codesign --options runtime --entitlements` (the JIT needs the JIT entitlements), make a
-  universal binary (and check the x64 JIT first), and an installer. `auval -v aumu Mdo1 Mdrm` passes today.
+- **0010 Packaging** (in progress; clew shows what is left). Exists now: the build signs the AU, VST3 and standalone
+  with the hardened runtime and the JIT entitlements JUCE writes (`cmake/codesign.cmake`, `MD_CODESIGN_IDENTITY`, ad-hoc
+  by default), then copies them; `release/build_release.sh [-v] [-s] [-n] [-a arm64|universal]` makes a clean Release
+  build, runs the tests that need no OS file, and writes `dist/Moduledrum-<v>-macos-<arch>.pkg` (AU and VST3 to
+  /Library/Audio/Plug-Ins, the app to /Applications) and a `.zip` of the three bundles; `-n` notarizes and staples
+  (needs the owner's Developer ID certificates and a `notarytool` keychain profile, untested here);
+  `.github/workflows/build.yml` builds and tests on an Apple Silicon runner and uploads the bundles; the README has
+  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the two x64 findings above (the
+  default release is arm64 until they are explained), loading the packaged build in a DAW, and the owner's certificates.
 - **0009 Master effects.** The Machinedrum's master section (rhythm echo, gate box/reverb, master EQ, dynamix) runs on
   the mixer DSP (DSP1) and is not emulated; the reverb and delay sends come out as their own buses instead. Options:
   run DSP1's own program in a second emulated DSP, or translate it to C++ as the per-track chain was. The MPC port's

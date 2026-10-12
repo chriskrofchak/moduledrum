@@ -1,0 +1,61 @@
+# Builds and tests Moduledrum on macOS (Apple Silicon). The tests that run the engine need the Machinedrum OS file,
+# which is not in the repository and not on the runner: they report as skipped, and the rest run. The plugin bundles are
+# uploaded as an artifact (ad-hoc signed, arm64 only: the universal installer comes from release/build_release.sh).
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      # ext/dsp56300 (with its asmjit) and ext/mc68k are submodules
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMD_BUILD_PLUGIN=ON -DMD_COPY_PLUGINS=OFF -DMD_USE_JIT=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # romart, firmware, golden-hash, kits, jit, resampler and plugin-* (the ones that need MD_OS_SYX skip themselves)
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # The build signs each bundle with the hardened runtime and the JIT entitlements (cmake/codesign.cmake)
+      - name: Verify the signatures
+        run: |
+          art=build/src/plugin/MdOne_artefacts/Release
+          for b in "$art/AU/Moduledrum.component" "$art/VST3/Moduledrum.vst3" "$art/Standalone/Moduledrum.app"; do
+            codesign --verify --strict --deep --verbose=2 "$b"
+          done
+          ents="$(codesign -d --entitlements - "$art/Standalone/Moduledrum.app" 2>/dev/null)"
+          echo "$ents"
+          [[ "$ents" == *com.apple.security.cs.allow-jit* ]]
+
+      # ditto keeps the executable bits and the signatures; upload-artifact alone would drop them
+      - name: Zip the bundles
+        run: |
+          art=build/src/plugin/MdOne_artefacts/Release
+          mkdir -p dist
+          ditto -c -k --keepParent "$art/AU/Moduledrum.component" dist/Moduledrum-AU.zip
+          ditto -c -k --keepParent "$art/VST3/Moduledrum.vst3" dist/Moduledrum-VST3.zip
+          ditto -c -k --keepParent "$art/Standalone/Moduledrum.app" dist/Moduledrum-Standalone.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: moduledrum-macos-arm64
+          path: dist/*.zip
