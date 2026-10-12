@@ -23,12 +23,22 @@ juce_add_plugin(MdOne
   NEEDS_MIDI_OUTPUT FALSE
   IS_MIDI_EFFECT FALSE
   EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-  COPY_PLUGIN_AFTER_BUILD ${MD_COPY_PLUGINS}
+  COPY_PLUGIN_AFTER_BUILD FALSE   # the copy is added below, after the signing
   AU_MAIN_TYPE kAudioUnitType_MusicDevice
   VST3_CATEGORIES Instrument Drum
   HARDENED_RUNTIME_ENABLED TRUE
   HARDENED_RUNTIME_OPTIONS ${MD_HARDENED_OPTS}
   MICROPHONE_PERMISSION_ENABLED FALSE)
+
+# Sign the bundles with the hardened runtime and the JIT entitlements JUCE wrote (MD_CODESIGN_IDENTITY, cmake/codesign.cmake),
+# then copy the signed ones: JUCE's own copy step would run first if COPY_PLUGIN_AFTER_BUILD were set above
+include(${CMAKE_SOURCE_DIR}/cmake/codesign.cmake)
+foreach(_md_format AU VST3 Standalone)
+  md_codesign_bundle(MdOne_${_md_format})
+endforeach()
+if(MD_COPY_PLUGINS)
+  juce_enable_copy_plugin_step(MdOne)
+endif()
 
 set(MD_ONE_SOURCES one/OneProcessor.cpp one/OneEditor.cpp one/MachinePicker.cpp one/KitBrowser.cpp one/Lcd.cpp one/SpecData.cpp
   KitLibrary.cpp MdRomArt.cpp)
