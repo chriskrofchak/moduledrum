@@ -181,6 +181,9 @@ So the x86_64 slice is experimental: the release script builds arm64 unless told
   addresses only after checking the ColdFire section's size and hash.
 - **The processor must never take the engine lock from the message thread for display** (the old status line did, and
   the audio thread dropped blocks); the editor reads atomics.
+- **Packaging:** releases are arm64 until the x64 JIT is verified (the universal build exists and is opt-in). The build
+  signs the bundles itself (hardened runtime; the JIT entitlements only stick to the standalone app, plugins run on their
+  host's), the installer installs system-wide (AU, VST3, app), and the `.zip` is made after notarization and stapling.
 - **Voice budget, silence release and voice-group splitting stay off** (not hardware behaviour, or not bit-exact).
 
 ## Repository history and local files
