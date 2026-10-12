@@ -68,6 +68,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <optional>
 #include <thread>
 #include <vector>
 #include "golden/GoldenPattern.h"
@@ -229,9 +230,11 @@ struct RenderOptions {
     double rate = 44100.0;
     int block = 512;
     double hostBpm = 120.0;   // the play head's tempo; 0 = no play head
-    double tempo = 120.0;     // the processor's tempo setting
-    int midiChannel = 10;
-    MdOneProcessor::NoteMap noteMap = MdOneProcessor::NoteMap::Chromatic;   // set explicitly: each map has its own hash
+    // The three globals are applied after `setup`; nullopt leaves what `setup` (a restored state) left. An optional rather than a
+    // flag: each global keeps its own default, and a pass can leave out any one of them.
+    std::optional<double> tempo = 120.0;   // the processor's tempo setting
+    std::optional<int> midiChannel = 10;
+    std::optional<MdOneProcessor::NoteMap> noteMap = MdOneProcessor::NoteMap::Chromatic;   // set explicitly: each map has its own hash
     bool allBuses = false;    // every track bus (mono) and both sends on
     bool testKit = true;      // the test kit (else the processor's default kit, or what `setup` loads)
     std::function<void(MdOneProcessor&)> setup;   // after the test kit
@@ -256,9 +259,9 @@ Render render(const std::vector<Note>& notes, int64_t frames, const RenderOption
     if (!p.engineReady()) { check(false, "render: no engine: " + p.statusText()); return r; }
     if (o.testKit) setupTestKit(p);
     if (o.setup) o.setup(p);
-    p.setMidiChannel(o.midiChannel);
-    p.setNoteMap(o.noteMap);
-    p.setTempo(o.tempo);
+    if (o.midiChannel) p.setMidiChannel(*o.midiChannel);
+    if (o.noteMap) p.setNoteMap(*o.noteMap);
+    if (o.tempo) p.setTempo(*o.tempo);
     if (o.allBuses) {
         auto layout = p.getBusesLayout();
         for (int b = 1; b < MdOneProcessor::kNumBuses; ++b)
@@ -756,7 +759,7 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         juce::MemoryBlock saved;
         std::vector<float> before;
         RenderOptions edit;
-        edit.noteMap = NoteMap::WhiteKeys;
+        edit.noteMap = NoteMap::Chromatic;   // not the processor's default (white keys): a restore that skips it plays other tracks
         edit.midiChannel = 3;
         edit.tempo = 133.5;
         edit.hostBpm = 0.0;
@@ -776,16 +779,25 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         };
         edit.after = [&](MdOneProcessor& p) { saved = stateOf(p); before = parameterValues(p); };
         const auto seq = testSequence();
-        std::vector<Note> white = seq;
-        for (auto& n : white) n.note = params::noteForTrack(params::trackForNote(n.note, NoteMap::Chromatic), NoteMap::WhiteKeys), n.channel = 3;
-        const auto a = render(white, kSequenceFrames, edit);
+        std::vector<Note> notes = seq;
+        for (auto& n : notes) n.channel = 3;
+        const auto a = render(notes, kSequenceFrames, edit);
         juce::MemoryBlock again;
         std::vector<float> after;
         RenderOptions restore = edit;
         restore.testKit = false;
+        // channel, note map and tempo come from the restored state alone: render() must not set them again
+        restore.midiChannel = std::nullopt;
+        restore.noteMap = std::nullopt;
+        restore.tempo = std::nullopt;
         restore.setup = [&](MdOneProcessor& p) { p.setStateInformation(saved.getData(), int(saved.getSize())); };
-        restore.after = [&](MdOneProcessor& p) { again = stateOf(p); after = parameterValues(p); };
-        const auto b = render(white, kSequenceFrames, restore);
+        restore.after = [&](MdOneProcessor& p) {
+            again = stateOf(p);
+            after = parameterValues(p);
+            check(p.midiChannel() == 3 && p.noteMap() == NoteMap::Chromatic && std::abs(p.tempo() - 133.5) < 1e-3,
+                  "a schema 2 state restores the MIDI channel (3), note map (chromatic) and tempo (133.5)");
+        };
+        const auto b = render(notes, kSequenceFrames, restore);
         check(before.size() == size_t(params::kTotal) && before == after, "an edited session: every parameter restored");
         check(saved == again, "its state saved again is the same bytes (" + juce::String(int(saved.getSize())) + " bytes)");
         check(a.ok && b.ok && hashMain(a) == hashMain(b) && !silentOf(a.ch[0]), "and it renders the same (" + hex(hashMain(a)) + ")");
