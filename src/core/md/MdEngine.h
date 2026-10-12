@@ -23,7 +23,7 @@ namespace md::engine
 {
 	struct EngineOptions
 	{
-		// The master effects need a second emulated DSP (a few hundred MB and 0.2 s of boot-up) and, per block, 12 us.
+		// The master effects need a second emulated DSP (about 215 MB in an engine, 55 ms to build) and, per block, 12 us.
 		// False: no MasterFx (Output::master stays zero); the dry outputs are the same either way.
 		bool master = true;
 	};
@@ -110,7 +110,7 @@ namespace md::engine
 
 		static constexpr bool kParallel = std::is_same_v<TVoices, ParallelVoiceEngine>;
 
-		// Word sets the master DSP is warmed up with when the engine is made (MasterFx::warmUp): 96 blocks of synthetic signal
+		// Word sets the master DSP is warmed up with when the engine is made (MasterFx::warmUp): 140 blocks of synthetic signal
 		// each, about 1 ms per set once compiled, and the compile itself
 		static constexpr int kMasterWarmUpSets = 24;
 
@@ -198,7 +198,7 @@ namespace md::engine
 		}
 
 		// Compile the master section ahead of the first live block, on settings that take its data-dependent paths (see
-		// MasterFx::warmUp): synthetic master bytes through the OS's own parameter code, a few hundred blocks of synthetic signal
+		// MasterFx::warmUp): synthetic master bytes through the OS's own parameter code, 24 x 140 blocks of synthetic signal
 		void warmUpMaster()
 		{
 			std::vector<uint32_t> words(static_cast<size_t>(kMasterWarmUpSets) * master::kWords);
