@@ -1,6 +1,8 @@
-// Moduledrum editor: the Machinedrum's LCD, drawn with the OS file's own fonts and dials, set in a chassis that holds
-// the OS-file picker and the engine status. Resizable from 50 to 200 % with its aspect ratio locked (ScaledEditor.h);
-// the size is a shared setting. Modelled on shnolk/monomodule src/plugin/one/OneEditor.{h,cpp} (AGPL-3.0).
+// Moduledrum editor: the Machinedrum's LCD, drawn with the OS file's own fonts and dials. The window is the LCD and
+// nothing else, as Monomodule's: no chassis around it. The OS-file picker, the skin and the engine status are in the
+// MENU at the header's right end; a footer carries the version and the corner grip. Resizable from 50 to 200 % with its
+// aspect ratio locked (ScaledEditor.h); the size is a shared setting. Modelled on shnolk/monomodule
+// src/plugin/one/OneEditor.{h,cpp} (AGPL-3.0).
 //
 // The LCD (.clew increment 0008), laid out as sd88me/mpc-vst-machinedrum's MPC skin: the header (the selected track's
 // machine, which opens the machine picker; the loaded kit; the product name), the selected track's four pages in
@@ -8,7 +10,8 @@
 // in Monomodule: drag (up or right turns it up), the mouse wheel, shift for fine steps, a click on the value to type
 // it or pick it from a list, a double-click on the dial for the default. The GLOBAL tab: the 16 LEV faders (MIXER),
 // the global parameters (TEMPO, CHAN, NOTES, ACCNT) with INIT KIT and EXPORT, and the kit browser (KitBrowser.h). A
-// .syx dropped anywhere on the editor is copied into the kit folder and shown there.
+// .syx dropped anywhere on the editor is copied into the kit folder and shown there; a Machinedrum OS file dropped
+// becomes the OS file.
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -258,7 +261,8 @@ public:
     void resized() override;
     void mouseDown(const juce::MouseEvent&) override;  // a press outside the picker closes it
 
-    // .syx files dropped on the editor go into the kit folder (KitLibrary::import); the GLOBAL tab then shows them
+    // .syx files dropped on the editor go into the kit folder (KitLibrary::import); the GLOBAL tab then shows them. A
+    // dropped file that holds no kit but is a Machinedrum OS is selected as the OS file.
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
     void fileDragEnter(const juce::StringArray&, int, int) override { m_dragOver = true; repaint(); }
     void fileDragExit(const juce::StringArray&) override { m_dragOver = false; repaint(); }
@@ -281,16 +285,24 @@ public:
     KitsPage& kitsPage() { return m_kits; }
     KitLibrary& kitLibrary() { return m_library; }
     bool exportKit(const juce::File& file);   // the loaded kit with the parameters' values, as a kit dump (EXPORT)
+    void showMenu();                          // the MENU button's menu
+    // Shows the engine status (two lines under the strip, from MdOneProcessor::statusText) or hides it; the view grows
+    // or shrinks by kStatusH (MENU > Show Engine Status, like Monomodule's)
+    void setStatusShown(bool shown);
+    bool statusShown() const { return m_showStatus; }
+    void applySkin(const skin::Skin& s);      // makes s the skin of every Moduledrum window (shared settings) and repaints
 
-    // LCD geometry (LCD px), as the MPC skin's: the header (the machine block, the product name), the 2x2 pages with a
-    // wide gap between the columns, then the strip; the glass's inner margin around it all
+    // LCD geometry (LCD px), as the MPC skin's: the header (the machine block, the kit, the product name, MENU), the 2x2
+    // pages with a wide gap between the columns, then the strip, then the footer (the version, the grip); the margin
+    // around it all
     static constexpr int kGlassPad = 5, kHeaderGap = 3, kColumnGap = 28, kRowGap = 7, kStripGap = 6;
+    static constexpr int kMenuW = 32, kMenuH = 10, kMenuGap = 8;   // the MENU block, and the gap to the product name
+    static constexpr int kFooterGap = 4, kFooterH = 8;
     static constexpr int kLcdContentW = 2 * KnobPage::kLcdW + kColumnGap;
     static constexpr int kPagesY = MachineBar::kLcdH + kHeaderGap, kRow2Y = kPagesY + KnobPage::kLcdH + kRowGap;
     static constexpr int kStripY = kRow2Y + KnobPage::kLcdH + kStripGap;
     static constexpr int kLcdContentH = kStripY + TrackStrip::kLcdH;
-    // Chassis geometry (screen px at the base size)
-    static constexpr int kMargin = 18, kBezel = 12, kGlassEdge = 8, kButtonRowH = 26;
+    static constexpr int kStatusH = 36;   // the engine status lines when shown (screen px at the base size)
 
 private:
     void timerCallback() override;
@@ -312,14 +324,14 @@ private:
     TrackStrip m_strip;
     std::array<std::unique_ptr<KnobPage>, kNumPages> m_pages;
     KitsPage m_kits;
-    LcdButton m_initKit{"INIT KIT"}, m_export{"EXPORT"};
+    LcdButton m_initKit{"INIT KIT"}, m_export{"EXPORT"}, m_menu{"MENU"};
     MachinePicker m_picker;
-    juce::TextButton m_select{"Select OS File..."};
-    juce::Label m_status, m_fwPath;
+    juce::Label m_status, m_fwPath;   // the engine status, shown on request (setStatusShown)
     ScaleGrip m_grip;
     std::unique_ptr<juce::FileChooser> m_chooser;
-    juce::Rectangle<int> m_glass, m_bezel, m_nameplate;   // screen px (the nameplate: the product name on the LCD)
-    juce::Point<int> m_lcd;                               // the LCD content's origin, screen px
+    juce::Rectangle<int> m_nameplate, m_footer;   // screen px: the product name in the header, the footer under the strip
+    juce::Point<int> m_lcd;                       // the LCD content's origin, screen px
+    bool m_showStatus = false;
     int m_track = 0;              // the track the pages show
     bool m_global = false;        // the GLOBAL tab shows
     std::array<int, 16> m_machines{};   // each track's machine as last shown (-1: not yet)

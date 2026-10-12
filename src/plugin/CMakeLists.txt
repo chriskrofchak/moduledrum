@@ -34,7 +34,7 @@ set(MD_ONE_SOURCES one/OneProcessor.cpp one/OneEditor.cpp one/MachinePicker.cpp 
   KitLibrary.cpp MdRomArt.cpp)
 target_sources(MdOne PRIVATE one/OneFactory.cpp ${MD_ONE_SOURCES})
 target_include_directories(MdOne PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(MdOne PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+target_compile_definitions(MdOne PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 MD_VERSION_STRING="${PROJECT_VERSION}")
 target_link_libraries(MdOne PRIVATE mdcore mddsp juce::juce_audio_utils
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
@@ -43,7 +43,7 @@ juce_add_console_app(MdPluginCheck PRODUCT_NAME "md-plugin-check")
 target_sources(MdPluginCheck PRIVATE Check.cpp ${MD_ONE_SOURCES})
 target_include_directories(MdPluginCheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(MdPluginCheck PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
-  JUCE_MODAL_LOOPS_PERMITTED=0 JUCE_STANDALONE_APPLICATION=1 MD_OS_SYX="${MD_OS_SYX}")
+  JUCE_MODAL_LOOPS_PERMITTED=0 JUCE_STANDALONE_APPLICATION=1 MD_OS_SYX="${MD_OS_SYX}" MD_VERSION_STRING="${PROJECT_VERSION}")
 target_link_libraries(MdPluginCheck PRIVATE mdcore mddsp juce::juce_audio_utils juce::juce_recommended_config_flags)
 if(MD_BUILD_TESTS)
   # OS-file handling: unconfigured start, a wrong file, the OS file (needs it: MD_OS_SYX or -DMD_OS_SYX=..., else skipped)

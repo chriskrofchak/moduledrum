@@ -1059,6 +1059,7 @@ int snapshot(const juce::File& outDir, const juce::String& os, const juce::Strin
             both("kit-track", [](OneView& v) { v.selectTrack(4); });   // a track of that kit
         }
         last = "track";
+        shot("status", 1.0, [](OneView& v) { v.setStatusShown(true); });   // MENU > Show Engine Status: the view grows
     }
     shot(last + "-50", 0.5);
     {   // the size: 50-200 % of the base, aspect ratio locked, and the last size the window was left at is shared
@@ -1139,6 +1140,11 @@ int checkEditor(const juce::String& os, const juce::String& kitsPath)
         check(p.trackParam(0, 8) == 20, "no OS file: AMD's knob still sets T1 AMD (" + juce::String(p.trackParam(0, 8)) + ")");
         check(kitFolder.isDirectory() && kitFolder.getParentDirectory() == settingsDir, "the kit folder is created beside the settings: " + kitFolder.getFullPathName());
         check(renders(*editor), "renders without an OS file");
+        if (os.isNotEmpty() && juce::File(os).existsAsFile()) {   // the OS file dropped on the editor (no kit in it) becomes the OS file
+            view->filesDropped({os}, 0, 0);
+            check(p.engineReady() && p.firmwarePath() == os && !view->globalShown() && view->page(OneView::Syn).message().isEmpty(),
+                  "the OS file dropped on the editor is selected as the OS file: " + p.statusText());
+        }
     }
     if (os.isEmpty() || !juce::File(os).existsAsFile()) {
         std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n");
@@ -1153,6 +1159,17 @@ int checkEditor(const juce::String& os, const juce::String& kitsPath)
     std::unique_ptr<juce::AudioProcessorEditor> editor(p.createEditor());
     auto& view = *md::plugin::one::oneViewOf(editor.get());
     view.refresh();
+    {   // MENU > Show Engine Status: the status lines get their own room under the strip; the editor follows at its scale
+        const int viewH = view.getHeight(), editorH = editor->getHeight();
+        const double scale = double(editor->getWidth()) / view.getWidth();
+        view.setStatusShown(true);
+        const bool grown = view.statusShown() && view.getHeight() == viewH + OneView::kStatusH
+                        && std::abs(editor->getHeight() - (viewH + OneView::kStatusH) * scale) <= 1.0;
+        view.setStatusShown(false);
+        check(grown && view.getHeight() == viewH && editor->getHeight() == editorH,
+              "the engine status shown adds " + juce::String(OneView::kStatusH) + " px to the view and the editor follows; hidden again, back to "
+              + juce::String(editorH) + " px");
+    }
     const auto labelOf = [&](int machine, int k) {
         for (const auto& m : p.machines()) if (m.id == machine) return juce::String(m.params[size_t(k)]);
         return juce::String("?");

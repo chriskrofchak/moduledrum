@@ -5,11 +5,11 @@
 namespace md::plugin::one {
 
 namespace {
-// The chassis around the LCD (after mk_skin.py's, from a photo of the MD): brushed aluminium, a glossy black bezel, the
-// LCD's backlight darkening towards its edge. Its print and labels are dark grey on the aluminium.
-const juce::Colour kAluTop(0xffbdbdbb), kAluBottom(0xffa2a2a0), kBezelFill(0xff070607), kBezelOuter(0xff505052),
-    kBezelInner(0xff18181a), kText(0xff1c1c1c), kDim(0xff4c4c4c), kError(0xff9c1a10), kPrint(0xff2c2c2c);
 constexpr const char* kProductName = "MODULEDRUM";   // on the LCD, top right, as the MPC skin has its name
+#ifndef MD_VERSION_STRING
+#define MD_VERSION_STRING "0.0.0"
+#endif
+constexpr const char* kVersionText = "V" MD_VERSION_STRING;   // the footer's left end, as Monomodule's
 
 // The GLOBAL page's cells that are not raw 0-127 knobs
 constexpr const char* const kNoteMapShort[2] = {"WHITE", "CHROM"};
@@ -600,12 +600,12 @@ void LcdButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
 
 void ScaleGrip::paint(juce::Graphics& g)
 {
-    // dots on every other grip pixel, filling the lower-right half, in the corner of the component
-    const int x0 = getWidth() - kDots * kScale, y0 = getHeight() - kDots * kScale;
-    g.setColour(kPrint);
+    // dots on every other grip pixel, filling the lower-right half of the kDots square at the component's top left (the
+    // footer's right end; the component itself reaches out to the window's corner to take presses there)
+    g.setColour(lcd::ink);
     for (int y = 0; y < kDots; y += 2)
         for (int x = 0; x < kDots; x += 2)
-            if (x + y >= kDots - 1) g.fillRect(x0 + x * kScale, y0 + y * kScale, kScale, kScale);
+            if (x + y >= kDots - 1) g.fillRect(x * kScale, y * kScale, kScale, kScale);
 }
 
 void ScaleGrip::mouseDown(const juce::MouseEvent& e)
@@ -696,25 +696,20 @@ OneView::OneView(MdOneProcessor& p) : m_proc(p), m_kits(p, m_library)
     addChildComponent(m_picker);   // last: over the pages
     addMouseListener(this, true);  // to close the picker on a press anywhere else
 
-    // the chassis: the OS picker and the status under the LCD
-    m_select.onClick = [this] { openOsChooser(); };
-    m_select.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2a2a2c));
-    m_select.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffe6e6e4));
-    m_select.setColour(juce::ComboBox::outlineColourId, juce::Colour(0xff151516));
-    m_status.setFont(juce::Font(juce::FontOptions(13.0f)));
+    // MENU (the OS file, the skin, the engine status), the status lines (hidden until asked for), the grip
+    m_menu.onClick = [this] { showMenu(); };
+    addAndMakeVisible(m_menu);
+    m_status.setFont(juce::Font(juce::FontOptions(12.0f)));
     m_status.setMinimumHorizontalScale(0.6f);
-    m_fwPath.setFont(juce::Font(juce::FontOptions(11.0f)));
+    m_fwPath.setFont(juce::Font(juce::FontOptions(12.0f)));
     m_fwPath.setMinimumHorizontalScale(0.5f);
-    m_fwPath.setColour(juce::Label::textColourId, kDim);
     for (auto* l : {&m_status, &m_fwPath}) { l->setBorderSize({0, 0, 0, 0}); l->setInterceptsMouseClicks(false, false); }
-    addAndMakeVisible(m_select);
-    addAndMakeVisible(m_status);
-    addAndMakeVisible(m_fwPath);
+    addChildComponent(m_status);
+    addChildComponent(m_fwPath);
     addAndMakeVisible(m_grip);
 
-    // the base size: the LCD glass in its bezel, then the button row and two status lines
-    const int glassW = (kLcdContentW + 2 * kGlassPad) * kScale, glassH = (kLcdContentH + 2 * kGlassPad) * kScale;
-    setSize(2 * kMargin + 2 * kBezel + glassW, kMargin + 2 * kBezel + glassH + 12 + kButtonRowH + 6 + 16 + 14 + 12);
+    // the base size: the LCD content and the footer, with the margin around them
+    setSize((kLcdContentW + 2 * kGlassPad) * kScale, (kLcdContentH + kFooterGap + kFooterH + 2 * kGlassPad) * kScale);
     m_machines.fill(-1);
     m_proc.takeTriggeredTracks();   // what played while no editor was open does not flash
     timerCallback();   // the machine table, the names, the status from the processor's state
@@ -731,51 +726,20 @@ OneView::~OneView()
 
 void OneView::paint(juce::Graphics& g)
 {
-    // brushed aluminium: a soft vertical gradient under faint horizontal streaks (the same streaks every time)
-    g.setGradientFill(juce::ColourGradient(kAluTop, 0.0f, 0.0f, kAluBottom, 0.0f, float(getHeight()), false));
-    g.fillAll();
-    juce::Random rnd(7);
-    for (int y = 0; y < getHeight(); ++y)
-        for (int s = 0; s < 3; ++s) {
-            const int x = rnd.nextInt(getWidth()), len = 20 + rnd.nextInt(juce::jmax(1, getWidth() / 2));
-            g.setColour((rnd.nextBool() ? juce::Colours::white : juce::Colours::black).withAlpha(0.02f + 0.05f * rnd.nextFloat()));
-            g.fillRect(x - len / 2, y, len, 1);
-        }
-
-    // the bezel: glossy black, a faint sheen towards the top right, a bevelled outer edge
-    const auto bz = m_bezel.toFloat();
-    g.setColour(kBezelFill);
-    g.fillRoundedRectangle(bz, 12.0f);
-    g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(0.0f), bz.getX(), bz.getBottom(),
-                                           juce::Colours::white.withAlpha(0.12f), bz.getRight(), bz.getY(), false));
-    g.fillRoundedRectangle(bz, 12.0f);
-    g.setColour(kBezelOuter);
-    g.drawRoundedRectangle(bz.reduced(0.5f), 12.0f, 1.0f);
-    g.setColour(kBezelInner);
-    g.drawRoundedRectangle(bz.reduced(1.5f), 11.0f, 1.0f);
-
-    // the LCD: a dark rim, the backlight darkening over its last few pixels, flat paper where anything is drawn
-    g.setColour(juce::Colours::black);
-    g.fillRect(m_glass.expanded(1));
-    const auto& paper = lcd::paper;
-    const auto edge = juce::Colour::fromFloatRGBA(paper.getFloatRed() * 0.8f, paper.getFloatGreen() * 0.8f, paper.getFloatBlue() * 0.8f, 1.0f);
-    for (int d = 0; d < kGlassEdge; ++d) {
-        g.setColour(edge.interpolatedWith(paper, float(d) / float(kGlassEdge)));
-        g.drawRect(m_glass.reduced(d), 1);
-    }
-    g.setColour(paper);
-    g.fillRect(m_glass.reduced(kGlassEdge));
-
-    // the product name, on the LCD at the header's right end (as the MPC skin's), in its bold face
+    g.fillAll(lcd::paper);   // the window is the LCD: flat paper, everything on it in ink
+    // the product name, at the header's right end before MENU (as the MPC skin's), in its bold face
     drawLcdText(g, spec::kFontBold8, kProductName, m_nameplate.getX(), m_nameplate.getY(), kScale, lcd::ink);
+    // the footer: the version at the left end (the grip is at the right)
+    const auto& f = spec::kFontSmall4x5;
+    drawLcdText(g, f, kVersionText, m_footer.getX(), m_footer.getBottom() - f.h * kScale, kScale, lcd::ink);
 }
 
-// While a .syx is dragged over the editor: a dotted ink frame, two LCD px wide, just inside the glass
+// While a .syx is dragged over the editor: a dotted ink frame, two LCD px wide, just inside the window's edge
 void OneView::paintOverChildren(juce::Graphics& g)
 {
     if (!m_dragOver) return;
     g.setColour(lcd::ink);
-    const auto r = m_glass.reduced(kScale);
+    const auto r = getLocalBounds().reduced(kScale);
     for (int x = r.getX(); x < r.getRight(); x += 2 * kScale) {
         g.fillRect(x, r.getY(), kScale, 2 * kScale);
         g.fillRect(x, r.getBottom() - 2 * kScale, kScale, 2 * kScale);
@@ -788,19 +752,17 @@ void OneView::paintOverChildren(juce::Graphics& g)
 
 void OneView::resized()
 {
-    const int glassW = (kLcdContentW + 2 * kGlassPad) * kScale, glassH = (kLcdContentH + 2 * kGlassPad) * kScale;
-    m_bezel = {kMargin, kMargin, glassW + 2 * kBezel, glassH + 2 * kBezel};
-    m_glass = m_bezel.reduced(kBezel);
-    m_lcd = {m_glass.getX() + kGlassPad * kScale, m_glass.getY() + kGlassPad * kScale};
+    m_lcd = {kGlassPad * kScale, kGlassPad * kScale};
     const auto at = [this](int x, int y) { return m_lcd + juce::Point<int>(x, y) * kScale; };   // LCD px -> screen px
 
-    // the header: the machine block (or GLOBAL) at the left; the product name at the right, the loaded kit before it
+    // the header: the machine block (or GLOBAL) at the left; MENU at the right, the product name and the loaded kit before it
     m_machineBar.setBounds(juce::Rectangle<int>(m_machineBar.preferredWidth(), m_machineBar.preferredHeight()).withPosition(at(0, 0)));
     m_globalTitle.setBounds(juce::Rectangle<int>(m_globalTitle.preferredWidth(), m_globalTitle.preferredHeight()).withPosition(at(0, 0)));
-    const int nameW = LcdCanvas::textWidth(spec::kFontBold8, kProductName);
-    m_nameplate = juce::Rectangle<int>(nameW * kScale, spec::kFontBold8.h * kScale).withPosition(at(kLcdContentW - nameW, (MachineBar::kLcdH - spec::kFontBold8.h) / 2));
+    m_menu.setBounds(juce::Rectangle<int>(kMenuW * kScale, kMenuH * kScale).withPosition(at(kLcdContentW - kMenuW, (MachineBar::kLcdH - kMenuH) / 2)));
+    const int nameW = LcdCanvas::textWidth(spec::kFontBold8, kProductName), nameX = kLcdContentW - kMenuW - kMenuGap - nameW;
+    m_nameplate = juce::Rectangle<int>(nameW * kScale, spec::kFontBold8.h * kScale).withPosition(at(nameX, (MachineBar::kLcdH - spec::kFontBold8.h) / 2));
     const int kitW = m_kitBox.preferredWidth();
-    m_kitBox.setBounds(juce::Rectangle<int>(kitW, KitBox::kLcdH * kScale).withPosition(at(kLcdContentW - nameW - 8, 0) - juce::Point<int>(kitW, 0)));
+    m_kitBox.setBounds(juce::Rectangle<int>(kitW, KitBox::kLcdH * kScale).withPosition(at(nameX - 8, 0) - juce::Point<int>(kitW, 0)));
     m_strip.setBounds(juce::Rectangle<int>(TrackStrip::kLcdW * kScale, TrackStrip::kLcdH * kScale).withPosition(at(0, kStripY)));
 
     // the pages: SYN | AMP/EFX over ROUTE | LFO; GLOBAL: MIXER over GLOBAL | KITS
@@ -820,15 +782,18 @@ void OneView::resized()
     // the picker unrolls from under the header over the pages and the strip
     m_picker.setTargetBounds(juce::Rectangle<int>(kLcdContentW * kScale, (kLcdContentH - kPagesY) * kScale).withPosition(at(0, kPagesY)));
 
-    // under the bezel: the OS picker, then the status lines
-    auto r = getLocalBounds().withTrimmedTop(m_bezel.getBottom() + 12).withTrimmedBottom(12).reduced(kMargin, 0);
-    auto row = r.removeFromTop(kButtonRowH);
-    m_select.setBounds(row.removeFromLeft(150));
-    r.removeFromTop(6);
-    m_status.setBounds(r.removeFromTop(16));
-    m_fwPath.setBounds(r.removeFromTop(14));
-    const int gripPx = ScaleGrip::kDots * kScale + 6;   // the grip takes presses out to the window's corner
-    m_grip.setBounds(getWidth() - gripPx, getHeight() - gripPx, gripPx, gripPx);
+    // under the strip: the status lines when shown, then the footer with the version and the grip
+    int y = at(0, kLcdContentH).y;
+    if (m_showStatus) {
+        auto lines = juce::Rectangle<int>(m_lcd.x, y + 6, kLcdContentW * kScale, kStatusH - 6);
+        m_status.setBounds(lines.removeFromTop(16));
+        m_fwPath.setBounds(lines.removeFromTop(14));
+        y += kStatusH;
+    }
+    m_footer = {m_lcd.x, y + kFooterGap * kScale, kLcdContentW * kScale, kFooterH * kScale};
+    const int gripPx = ScaleGrip::kDots * kScale;   // the grip takes presses out to the window's corner
+    const juce::Point<int> grip(m_footer.getRight() - gripPx, m_footer.getBottom() - gripPx);
+    m_grip.setBounds(grip.x, grip.y, getWidth() - grip.x, getHeight() - grip.y);
 }
 
 void OneView::mouseDown(const juce::MouseEvent& e)
@@ -925,9 +890,9 @@ void OneView::updateSyn()
         m_machineBar.setMachine({}, m_proc.machines().empty() ? juce::String("NO OS") : juce::String(id));
         syn.setBadge({});
         if (m_proc.firmwarePath().isEmpty())
-            message = {"No OS file", "", "Select the Machinedrum's OS file below (OS 1.63, a free download from Elektron)"};
+            message = {"No OS file", "", "MENU > Select OS File... (the Machinedrum OS 1.63, a free download from Elektron)", "", "or drop the .syx here"};
         else if (m_proc.machines().empty())
-            message = {"The OS file did not load", "", "See the status below"};
+            message = {"The OS file did not load", "", m_proc.statusText(), "", "MENU > Select OS File..."};
     }
     syn.setMessage(message);
 }
@@ -995,7 +960,11 @@ void OneView::filesDropped(const juce::StringArray& files, int, int)
     for (const auto& f : files) {
         if (!f.endsWithIgnoreCase(".syx")) continue;
         juce::String b;
-        if (m_library.import(juce::File(f), message, &b)) bank = b;
+        if (m_library.import(juce::File(f), message, &b)) { bank = b; continue; }
+        // no kit in it: a Machinedrum OS becomes the OS file (the processor loads it; a failure shows on the SYN page)
+        bool isOs = false;
+        try { (void)md::fw::loadFirmware(juce::File(f).getFullPathName().toStdString()); isOs = true; } catch (const std::exception&) {}
+        if (isOs) { m_proc.setFirmwarePath(juce::File(f).getFullPathName()); timerCallback(); selectTrack(m_track); return; }
     }
     showGlobal();
     m_kits.update();
@@ -1036,6 +1005,57 @@ void OneView::openOsChooser()
     });
 }
 
+// ---- MENU ----
+
+void OneView::showMenu()
+{
+    juce::PopupMenu m;
+    m.addItem(1, "Select OS File...");
+    m.addItem(2, "Clear OS File Selection", m_proc.firmwarePath().isNotEmpty());
+    m.addSeparator();
+    {   // the LCD's two colours, shared by every Moduledrum window (Skin.h); the custom pair is set in the settings file
+        juce::PopupMenu skins;
+        const auto cur = skin::current().preset;
+        for (int i = 0; i < skin::kNumPresets; ++i) {
+            const auto p = skin::Preset(i);
+            if (p == skin::Preset::Custom && cur != p) continue;
+            const auto name = juce::String(skin::kPresetNames[i]).toLowerCase();
+            skins.addItem(10 + i, name.substring(0, 1).toUpperCase() + name.substring(1), p != skin::Preset::Custom, cur == p);
+        }
+        m.addSubMenu("Skin", skins);
+    }
+    m.addItem(3, "Show Engine Status", true, m_showStatus);
+    m.addSeparator();
+    m.addItem(4, "Kit Folder...");
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&m_menu), [this](int r) {
+        switch (r) {
+        case 1: openOsChooser(); break;
+        case 2: m_proc.clearFirmware(); timerCallback(); break;
+        case 3: setStatusShown(!m_showStatus); break;
+        case 4: m_library.folder().revealToUser(); break;
+        case 10: case 11: case 12: applySkin(skin::presetSkin(skin::Preset(r - 10))); break;
+        default: break;
+        }
+    });
+}
+
+void OneView::setStatusShown(bool shown)
+{
+    if (shown == m_showStatus) return;
+    m_showStatus = shown;
+    m_status.setVisible(shown);
+    m_fwPath.setVisible(shown);
+    m_tick = 0;   // the next tick fills the lines in
+    setSize(getWidth(), getHeight() + (shown ? kStatusH : -kStatusH));   // the editor follows (ScaledHolder::childBoundsChanged)
+}
+
+void OneView::applySkin(const skin::Skin& s)
+{
+    skin::apply(s);
+    skin::save(s);
+    repaint();   // every element reads lcd::ink / lcd::paper when it paints; the value editor sets its colours when it opens
+}
+
 // ---- the timer (30 Hz): everything here reads atomics or message-thread state; nothing waits on the audio thread ----
 
 void OneView::timerCallback()
@@ -1060,7 +1080,8 @@ void OneView::timerCallback()
     if (m_tick % 15 == 1) {   // the status, twice a second
         const bool ready = m_proc.engineReady();
         m_status.setText(m_proc.statusText(), juce::dontSendNotification);
-        m_status.setColour(juce::Label::textColourId, ready ? kText : kError);
+        m_status.setColour(juce::Label::textColourId, ready ? lcd::ink : lcd::ink.interpolatedWith(juce::Colours::red, 0.6f));
+        m_fwPath.setColour(juce::Label::textColourId, lcd::ink.withAlpha(0.7f));
         m_fwPath.setText("OS: " + (m_proc.firmwarePath().isEmpty() ? juce::String("(none)") : m_proc.firmwarePath()), juce::dontSendNotification);
     }
 }
