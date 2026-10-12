@@ -118,6 +118,7 @@ MD_OS_SYX=/path/to/Elektron_SPS1-1UW_OS1.63.syx ctest --test-dir build --output-
 Without the OS file, the tests that run the engine are reported as skipped and the rest still run.
 `MD_KITS_SYX=/path/to/a kit dump .syx` adds the kit cases: kit files decoded and re-encoded byte for byte, a kit through
 the plugin's parameters and saved state, and the editor's kit browser. `plugin-editor` drives the editor headlessly;
+`plugin-rt` checks that `processBlock` makes no heap allocation (macOS);
 `md-plugin-check --snapshot <dir>` renders its pages to PNG for review (they show artwork read from your OS file, so
 don't commit them).
 

@@ -33,6 +33,7 @@ namespace md::engine
 	template<class TVoices>
 	HostModel<TVoices>::HostModel(MachineRunner& _os, TVoices& _voices) : m_os(_os), m_voices(_voices)
 	{
+		m_activeOrder.reserve(kTracks);	// trigger() runs on the plugin's audio thread: it never grows past this
 		setTempo(125.0);
 		m_pendingMachine.fill(-1);
 		m_route.fill(6);
@@ -118,7 +119,7 @@ namespace md::engine
 				m_trigger[victim] = false;	// cut before it ever sounded (triggered earlier in this same block)
 				m_silenceNext[victim] = true;	// written by the victim's next updateVoice (a write here would be overwritten by it)
 			}
-			m_activeOrder.push_back(_track);
+			m_activeOrder.push_back(_track);	// each track at most once (erased above), so within the reserved kTracks: no allocation
 			m_quiet[static_cast<size_t>(_track)] = 0;
 		}
 		if constexpr(std::is_same_v<TVoices, ParallelVoiceEngine>)

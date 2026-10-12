@@ -115,7 +115,7 @@ namespace md::engine
 		int m_maxActive = kTracks * 2;
 		std::array<bool, kTracks> m_silenceNext{};	// budget victims to silence on their next tick
 		std::array<float, kTracks> m_costEma{};	// DSP instructions per block a track costs while it sounds (moving average), for group balancing
-		std::vector<int> m_activeOrder;	// least- to most-recently-triggered
+		std::vector<int> m_activeOrder;	// least- to most-recently-triggered; each track at most once (capacity kTracks, reserved)
 		int m_releaseThreshold = -1, m_releaseBlocks = 0;	// silence release, off (see setSilenceRelease)
 		std::array<int, kTracks> m_quiet{};	// consecutive quiet blocks per sounding voice
 		uint32_t m_releases = 0;

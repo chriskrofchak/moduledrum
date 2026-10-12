@@ -68,9 +68,11 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
 - `md-machines <OS>`: the OS machine table (135 machines: id, name, SYN labels).
 - `md-kits list|render`: the kits of a `.syx`, and one kit rendered to a WAV (each track solo, then all).
 - `md-voicediag`: the voice DSP program as the harness sets it up, disassembled or stepped.
-- `md-plugin-check --check-os-load | --check-render | --check-state | --check-editor | --snapshot <dir> | --bench 20`:
-  the plugin headless. `--bench` is the CPU figure quoted below (all 16 tracks retriggered 8x per beat at 120 BPM,
-  64-sample blocks) and checks that no callback goes over budget.
+- `md-plugin-check --check-os-load | --check-render | --check-state | --check-editor | --check-rt | --snapshot <dir> |
+  --bench 20`: the plugin headless. `--bench` is the CPU figure quoted below (all 16 tracks retriggered 8x per beat at
+  120 BPM, 64-sample blocks) and checks that no callback goes over budget. `--check-rt` (ctest `plugin-rt`) counts every
+  heap allocation in `processBlock` (macOS `malloc_logger` plus a replaced `operator new`) and fails on any outside
+  dsp56300's JIT compiles; `MD_RT_ALLOC_TRACE=1` prints the call stacks.
 
 ## Established facts and measurements (Apple Silicon, macOS 26, Apple clang 21)
 
@@ -84,6 +86,10 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
 - **Memory:** about 420-500 MB per instance (the emulator's memory and the interpreter's opcode cache). The MPC port
   trimmed this ("about 225 MB less RAM", its HANDOFF); not done here yet.
 - **Latency:** 0 samples at 44.1 kHz, 40 at 48 kHz, 79 at 96 kHz (the resampler), reported to the host.
+- **No heap allocation on the audio thread** (increment 0014, ctest `plugin-rt`), JUCE's MIDI handling included, except
+  dsp56300's JIT compiling a voice-program block the first time the program reaches it (~500 blocks, ~5900 mallocs,
+  in the first dozen callbacks after an OS load; a new machine or a rare path compiles a few more later). Before 0014
+  the engine glue made ~2,750 allocations a second (`MachineRunner::call` copied its arguments into a vector).
 - **`ParallelVoiceEngine` (voices split over several DSP instances) is not bit-exact for real kits.** Kit 0 renders
   differently with 2 groups from block 301 (a TRX-MA: voices in one DSP instance share state, probably a noise source).
   The golden pattern happens not to show it. The plugin uses the single `VoiceEngine`; do not add group splitting

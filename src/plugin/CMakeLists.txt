@@ -40,7 +40,7 @@ target_link_libraries(MdOne PRIVATE mdcore mddsp juce::juce_audio_utils
 
 # Headless checks of the processor's OS-file handling (a development tool, not installed; see Check.cpp)
 juce_add_console_app(MdPluginCheck PRODUCT_NAME "md-plugin-check")
-target_sources(MdPluginCheck PRIVATE Check.cpp ${MD_ONE_SOURCES})
+target_sources(MdPluginCheck PRIVATE Check.cpp AllocCounter.cpp ${MD_ONE_SOURCES})
 target_include_directories(MdPluginCheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(MdPluginCheck PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
   JUCE_MODAL_LOOPS_PERMITTED=0 JUCE_STANDALONE_APPLICATION=1 MD_OS_SYX="${MD_OS_SYX}" MD_VERSION_STRING="${PROJECT_VERSION}")
@@ -60,4 +60,7 @@ if(MD_BUILD_TESTS)
   # snapshot, MD_KITS_SYX, adds the browser's kit cases), every page rendered
   add_test(NAME plugin-editor COMMAND MdPluginCheck --check-editor)
   set_tests_properties(plugin-editor PROPERTIES SKIP_RETURN_CODE 77)
+  # The real-time path: no heap allocation in processBlock once the test sequence has played once (needs the OS file)
+  add_test(NAME plugin-rt COMMAND MdPluginCheck --check-rt)
+  set_tests_properties(plugin-rt PROPERTIES SKIP_RETURN_CODE 77)
 endif()

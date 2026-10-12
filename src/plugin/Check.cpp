@@ -28,7 +28,15 @@
 //
 //   md-plugin-check --bench [seconds] [--fw os.syx]
 //       CPU use with all 16 tracks triggered 8 times per beat at 120 BPM: the processor at a 64-sample host buffer at
-//       44.1, 48 and 96 kHz (mean and worst callback against its real-time budget), and the engine alone for reference.
+//       44.1, 48 and 96 kHz (mean and worst callback against its real-time budget, and the heap allocations in
+//       processBlock after the first second, the JIT's apart: see --check-rt), and the engine alone for reference.
+//
+//   md-plugin-check --check-rt [--fw os.syx]
+//       Pass/fail, the real-time path (.clew increment 0014): no heap allocation in processBlock (operator new, and on
+//       macOS every malloc) at 44.1, 48 and 96 kHz and several block sizes, with notes on every track, editor keys,
+//       automation, tempo and machine changes; only the DSP's JIT may allocate, when it compiles a block the first
+//       time the voice program reaches it (counted apart). MD_RT_ALLOC_TRACE=1 prints the call stacks of the first
+//       allocations. Exit code 77 (skipped) without an OS file, or off macOS (needs malloc_logger).
 //
 //   md-plugin-check --check-editor [--fw os.syx] [--kits kits.syx]
 //       Pass/fail, the editor (.clew increment 0008), headless: without an OS file it opens and its knobs work; with one,
@@ -65,6 +73,7 @@
 #include "golden/GoldenPattern.h"
 #include "md/library/KitApply.h"
 #include "md/library/MdSysex.h"
+#include "AllocCounter.h"
 #include "one/OneEditor.h"
 #include "one/OneProcessor.h"
 #include "ScaledEditor.h"
@@ -936,6 +945,8 @@ int bench(const juce::String& os, double seconds)
         double sum = 0.0;
         int callbacks = 0;
         std::vector<double> times;   // after the first second (first touches of the engine's memory)
+        md::plugin::check::AllocCounts allocs;   // in processBlock, after the first second
+        int jitCallbacks = 0;
         const double budget = kBlock / rate;
         for (int64_t pos = 0; pos + kBlock <= total; pos += kBlock) {
             midi.clear();
@@ -944,20 +955,126 @@ int bench(const juce::String& os, double seconds)
                 if (s >= pos + kBlock) break;
                 midi.addEvent(juce::MidiMessage::noteOn(notes[next].channel, notes[next].note, uint8_t(notes[next].velocity)), int(s - pos));
             }
+            const bool warm = pos >= int64_t(rate);
+            if (warm) md::plugin::check::AllocCounter::begin();
             const auto t0 = std::chrono::steady_clock::now();
             p.processBlock(buf, midi);
             const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (warm) {
+                const auto c = md::plugin::check::AllocCounter::end();
+                allocs += c;
+                jitCallbacks += c.jit > 0 ? 1 : 0;
+            }
             sum += s; ++callbacks;
-            if (pos >= int64_t(rate)) times.push_back(s);
+            if (warm) times.push_back(s);
         }
         std::sort(times.begin(), times.end());
         const auto at = [&](double q) { return times[std::min(times.size() - 1, size_t(q * double(times.size())))]; };
         const auto over = std::count_if(times.begin(), times.end(), [&](double t) { return t > budget; });
-        std::printf("processor %3.0f kHz, %d-sample blocks: %5.1f %% of real time; callbacks after 1 s (budget %.0f us): 99 %% %.0f us, 99.9 %% %.0f us, max %.0f us, %d of %d over budget; latency %d\n",
-                    rate / 1000.0, kBlock, 100.0 * sum / (double(callbacks) * budget), budget * 1e6, at(0.99) * 1e6, at(0.999) * 1e6, times.back() * 1e6, int(over), int(times.size()), p.getLatencySamples());
+        std::printf("processor %3.0f kHz, %d-sample blocks: %5.1f %% of real time; callbacks after 1 s (budget %.0f us): 99 %% %.0f us, 99.9 %% %.0f us, max %.0f us, %d of %d over budget; latency %d; allocations after 1 s: %llu, and %llu in the JIT's compiles in %d callbacks\n",
+                    rate / 1000.0, kBlock, 100.0 * sum / (double(callbacks) * budget), budget * 1e6, at(0.99) * 1e6, at(0.999) * 1e6, times.back() * 1e6, int(over), int(times.size()), p.getLatencySamples(),
+                    (unsigned long long) allocs.outsideJit(), (unsigned long long) allocs.jit, jitCallbacks);
     }
     settingsDir.deleteRecursively();
     return 0;
+}
+
+// ---- The real-time path (--check-rt) ----
+
+// No heap allocation in processBlock (.clew increment 0014). Each setting renders kRtSeconds of the bench's load (all
+// 16 tracks triggered 8 times per beat) plus what a session adds: editor keyboard notes, automation, tempo and machine
+// changes between blocks (each as a host or the editor makes it, outside the counted calls). Every allocation in every
+// processBlock call counts (AllocCounter: malloc level, operator new among them), from the first call on. The one
+// exception is dsp56300's JIT: it compiles each voice-program block on the audio thread the first time the program
+// reaches it, and that allocates (inherent to the emulator, not in scope here); AllocCounter tells those allocations
+// apart by their call stacks and they are reported, not held against the check. The sequence plays twice (it repeats
+// every kRtPeriod seconds); the second time through shows the JIT settled (it compiles little or nothing more).
+int checkRt(const juce::String& os)
+{
+    using md::plugin::check::AllocCounter;
+    using md::plugin::check::AllocCounts;
+    if (os.isEmpty() || !juce::File(os).existsAsFile()) { std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n"); return 77; }
+    if (!AllocCounter::mallocHooked()) { std::printf("[SKIP] counting allocations needs macOS's malloc_logger (to tell the JIT's apart)\n"); return 77; }
+    check(AllocCounter::selfTest(), "the allocation counter sees operator new and malloc");
+    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-rt");
+    settingsDir.deleteRecursively();
+    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    md::plugin::saveSharedOsPath(os);
+    const bool trace = std::getenv("MD_RT_ALLOC_TRACE") != nullptr;
+
+    constexpr double kRtPeriod = 4.0, kRtSeconds = 2 * kRtPeriod;
+    constexpr int64_t kStepFrames = 86 * 32;   // 16ths at ~120 BPM
+    struct Setting { double rate; int block; bool allBuses; };
+    for (const Setting s : {Setting{44100.0, 64, false}, Setting{48000.0, 480, true}, Setting{96000.0, 256, false}, Setting{44100.0, 1024, true}}) {
+        MdOneProcessor p;
+        if (!p.engineReady()) { check(false, "no engine: " + p.statusText()); return 1; }
+        setupTestKit(p);
+        p.setMidiChannel(10);
+        p.setNoteMap(MdOneProcessor::NoteMap::WhiteKeys);
+        p.setAccent(64);
+        if (s.allBuses) {
+            auto layout = p.getBusesLayout();
+            for (int b = 1; b < MdOneProcessor::kNumBuses; ++b)
+                layout.outputBuses.getReference(b) = b < MdOneProcessor::kReverbBus ? juce::AudioChannelSet::mono() : juce::AudioChannelSet::stereo();
+            p.setBusesLayout(layout);
+            for (int t = 0; t < 16; t += 3) p.setTrackOutput(t, true);
+        }
+        p.setRateAndBufferSizeDetails(s.rate, s.block);
+        p.prepareToPlay(s.rate, s.block);
+        FixedPlayHead head;
+        p.setPlayHead(&head);
+        juce::AudioBuffer<float> buf(p.getTotalNumOutputChannels(), s.block);
+        juce::MidiBuffer midi;
+        midi.ensureSize(4096);
+        const auto period = int64_t(kRtPeriod * s.rate), total = int64_t(kRtSeconds * s.rate);
+        const auto stepSamples = int64_t(double(kStepFrames) * s.rate / 44100.0);
+        AllocCounts pass[2];
+        uint64_t callbacks[2] = {}, jitCallbacks[2] = {};
+        int traced = 0;
+        for (int64_t pos = 0; pos + s.block <= total; pos += s.block) {
+            const int64_t at = pos % period;   // the sequence: the same every period
+            // host MIDI: every track on each 16th, full velocity (accented) on the downbeats, a note-off for each
+            midi.clear();
+            for (int64_t step = (at + stepSamples - 1) / stepSamples * stepSamples; step < at + s.block; step += stepSamples) {
+                const int vel = (step / stepSamples) % 4 == 0 ? 127 : 90;
+                for (int t = 0; t < 16; ++t) {
+                    const int note = md::plugin::one::params::noteForTrack(t, MdOneProcessor::NoteMap::WhiteKeys);
+                    midi.addEvent(juce::MidiMessage::noteOn(10, note, uint8_t(vel)), int(step - at));
+                    midi.addEvent(juce::MidiMessage::noteOff(10, note), int(step - at));
+                }
+            }
+            // the editor and the host between blocks: a key on the editor's keyboard, automation, machine changes
+            const auto crossed = [&](double sec) { const auto x = int64_t(sec * s.rate); return at <= x && x < at + s.block; };
+            if (crossed(0.3) || crossed(2.1)) p.keyboardState().noteOn(1, 40, 1.0f);
+            if (crossed(0.4) || crossed(2.2)) p.keyboardState().noteOff(1, 40, 0.0f);
+            if (crossed(1.0)) { p.setTrackParam(2, 12, 90); p.setTrackParam(1, 21, 100); p.setTempo(133.0); head.bpm = 0.0; }
+            if (crossed(3.0)) { p.setTrackParam(2, 12, 30); p.setTrackParam(1, 21, 64); p.setTempo(120.0); head.bpm = 120.0; }
+            if (crossed(1.5)) { p.setMachine(0, 32); p.setMachine(5, 17); }
+            if (crossed(3.5)) { p.setMachine(0, 16); p.setMachine(5, 49); }
+
+            AllocCounter::begin();
+            p.processBlock(buf, midi);
+            const auto c = AllocCounter::end();
+            const int k = pos >= period ? 1 : 0;
+            pass[k] += c;
+            ++callbacks[k];
+            jitCallbacks[k] += c.jit > 0 ? 1 : 0;
+            if (trace && c.outsideJit() > 0 && traced++ < 4)
+                std::printf("  callback at %.4f s, %llu allocations outside the JIT:\n%s", double(pos) / s.rate,
+                            (unsigned long long) c.outsideJit(), AllocCounter::report().c_str());
+        }
+        p.setPlayHead(nullptr);
+        const auto what = juce::String(s.rate / 1000.0, 1) + " kHz, " + juce::String(s.block) + "-sample blocks" + (s.allBuses ? ", every bus on" : "");
+        for (int k = 0; k < 2; ++k)
+            std::printf("       %s, %s pass, %llu callbacks: %llu allocations outside the JIT; it compiled in %llu callbacks, %llu allocations (all: %llu, %llu by operator new)\n",
+                        what.toRawUTF8(), k ? "second" : "first", (unsigned long long) callbacks[k], (unsigned long long) pass[k].outsideJit(),
+                        (unsigned long long) jitCallbacks[k], (unsigned long long) pass[k].jit, (unsigned long long) pass[k].all, (unsigned long long) pass[k].news);
+        const auto outside = pass[0].outsideJit() + pass[1].outsideJit();
+        check(outside == 0, what + ": no allocation in processBlock outside the JIT's compiles"
+                                + (outside > 0 && !trace ? " (MD_RT_ALLOC_TRACE=1 prints where)" : ""));
+    }
+    settingsDir.deleteRecursively();
+    return g_failures ? 1 : 0;
 }
 
 // ---- The editor (--snapshot, --check-editor) ----
@@ -1461,6 +1578,7 @@ int main(int argc, char** argv)
     if (mode == "--check-render") return checkRender(os);
     if (mode == "--check-state") return checkState(os, kits);
     if (mode == "--bench") return bench(os, std::max(1.0, benchSeconds));
+    if (mode == "--check-rt") return checkRt(os);
     if (mode == "--check-editor") return checkEditor(os, kits);
     if (mode == "--snapshot") return snapshot(juce::File::getCurrentWorkingDirectory().getChildFile(outDir), os, kits);
     std::fprintf(stderr, "usage: md-plugin-check --check-os-load [--fw os.syx]\n"
@@ -1468,6 +1586,7 @@ int main(int argc, char** argv)
                          "       md-plugin-check --check-state [--fw os.syx] [--kits kits.syx]\n"
                          "       md-plugin-check --check-editor [--fw os.syx] [--kits kits.syx]\n"
                          "       md-plugin-check --bench [seconds] [--fw os.syx]\n"
+                         "       md-plugin-check --check-rt [--fw os.syx]\n"
                          "       md-plugin-check --snapshot <dir> [--fw os.syx] [--kits kits.syx]\n");
     return 2;
 }

@@ -13,7 +13,12 @@
 //
 // The sound (.clew increment 0004) is the host parameters (OneParams.h: per track the machine, the 24 kit parameters,
 // LEV and the LFO page; tempo, MIDI channel, accent and note map), raw integers as in a kit. processBlock reads them at
-// the start of every block and passes what changed to the engine; nothing on that path locks or allocates. A machine
+// the start of every block and passes what changed to the engine. Nothing on the processBlock path, engine included,
+// allocates (md-plugin-check --check-rt counts every malloc; .clew increment 0014), except dsp56300's JIT, which
+// compiles each voice-program block on the audio thread the first time the program reaches it. It never waits on a
+// lock: the engine lock is only tried (a block during an OS load is skipped); the one lock it takes is the editor
+// keyboard's (juce::MidiKeyboardState::processNextMidiBuffer, every block, the standard JUCE idiom), held by the
+// message thread only while a key on the editor's keyboard goes down or up. A machine
 // change resets SYN1-8 to the machine's defaults, as on the MD: the engine takes the defaults at once, the SYN
 // parameters follow on the message thread (with their new names, and the host told that names changed). The loaded
 // kit (md::library::Kit) is the canonical form of the sound: parameters and kit convert both ways (kitToParameters,

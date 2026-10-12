@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <stdexcept>
 
 #include "mc68k/mc68k.h"
@@ -137,9 +138,9 @@ namespace md::engine
 		m_fault.clear();
 		auto& cpu = *m_cpu;
 		uint32_t sp = kStackTop;
-		// C calling convention: arguments pushed right to left, then the return address
-		std::vector<uint32_t> args(_args);
-		for(auto it = args.rbegin(); it != args.rend(); ++it) { sp -= 4; poke32(sp, *it); }
+		// C calling convention: arguments pushed right to left, then the return address. Straight from the list: this
+		// runs on the plugin's audio thread (every control tick and trigger) and must not allocate.
+		for(auto it = std::rbegin(_args); it != std::rend(_args); ++it) { sp -= 4; poke32(sp, *it); }
 		sp -= 4; poke32(sp, kReturnSentinel);
 		cpu.setAReg(7, sp);
 		cpu.setPC(_address);
