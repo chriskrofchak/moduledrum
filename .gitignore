@@ -13,3 +13,6 @@ CMakeUserPresets.json
 CLAUDE.md
 .claude/
 /resources/
+
+# Release builds (release/build_release.sh)
+dist/

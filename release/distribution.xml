@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The installer's distribution: the three component packages as choices, all selected by default, installed
+     system-wide. release/build_release.sh substitutes the release version for the placeholder in the pkg-refs below
+     and passes the result to productbuild. -->
+<installer-gui-script minSpecVersion="2">
+  <title>Moduledrum</title>
+  <options customize="allow" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <volume-check>
+    <allowed-os-versions>
+      <os-version min="12.0"/>
+    </allowed-os-versions>
+  </volume-check>
+  <welcome file="welcome.html" mime-type="text/html"/>
+  <conclusion file="conclusion.html" mime-type="text/html"/>
+
+  <choices-outline>
+    <line choice="au"/>
+    <line choice="vst3"/>
+    <line choice="standalone"/>
+  </choices-outline>
+
+  <choice id="au" title="Audio Unit" description="Moduledrum.component, installed in /Library/Audio/Plug-Ins/Components.">
+    <pkg-ref id="md.elektron-md.one.au"/>
+  </choice>
+  <choice id="vst3" title="VST3" description="Moduledrum.vst3, installed in /Library/Audio/Plug-Ins/VST3.">
+    <pkg-ref id="md.elektron-md.one.vst3"/>
+  </choice>
+  <choice id="standalone" title="Standalone app" description="Moduledrum.app, installed in /Applications.">
+    <pkg-ref id="md.elektron-md.one.standalone"/>
+  </choice>
+
+  <pkg-ref id="md.elektron-md.one.au" version="@VERSION@" onConclusion="none">Moduledrum-AU.pkg</pkg-ref>
+  <pkg-ref id="md.elektron-md.one.vst3" version="@VERSION@" onConclusion="none">Moduledrum-VST3.pkg</pkg-ref>
+  <pkg-ref id="md.elektron-md.one.standalone" version="@VERSION@" onConclusion="none">Moduledrum-Standalone.pkg</pkg-ref>
+</installer-gui-script>
