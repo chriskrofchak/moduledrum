@@ -7,7 +7,7 @@ Motorola DSP56300 and the OS's own machine code in an emulated ColdFire, on the 
 [Machinemodule for MPC OS](https://github.com/sd88me/mpc-vst-machinedrum).
 
 <p align="center">
-  <img src="docs/moduledrum.png" width="760" alt="The Moduledrum editor: the Machinedrum LCD with track 5's SYN, AMP/EFX, ROUTE and LFO pages, and the strip of 16 tracks">
+  <img src="docs/moduledrum.png" width="760" alt="The Moduledrum editor: the Machinedrum LCD with track 5 of the kit FRANSISCO, its SYN, AMP/EFX, ROUTE and LFO pages, and the strip with GLOBAL, MASTER and the 16 tracks">
 </p>
 
 > **Moduledrum is not affiliated with, endorsed by or sponsored by Elektron.** "Elektron" and "Machinedrum" are
@@ -42,11 +42,18 @@ Moduledrum window shares one size setting.
 
 ## The editor
 
-The LCD is drawn with the OS file's own fonts and dials, in the layout of Machinemodule's MPC skin.
+The LCD is drawn with the OS file's own fonts and dials, in the layout of Machinemodule's MPC skin. MENU (top right) has
+a Skin submenu with eight colour schemes for the LCD (Machinedrum, Inverted, Black on White, White on Black, Low
+Contrast, Green, Amber and Blue LCD) and a custom pair of colours, shared by every Moduledrum window.
 
 <p align="center">
-  <img src="docs/global.png" width="49%" alt="The GLOBAL tab: the mixer with the 16 tracks' levels, tempo, MIDI channel, note map, accent and the kit browser">
+  <img src="docs/global.png" width="49%" alt="The GLOBAL tab: the mixer with the 16 tracks' levels, tempo, MIDI channel, note map, accent, the master switch and the kit browser showing a bank">
   <img src="docs/machine-picker.png" width="49%" alt="The machine picker: the OS's machines in columns by group (GND, TRX, EFM, E12, P-I, INP, MID, CTR, ROM, RAM)">
+</p>
+
+<p align="center">
+  <img src="docs/master.png" width="49%" alt="The MASTER tab: the kit's rhythm echo, gate box reverb, master EQ and dynamix pages">
+  <br><em>The MASTER tab: the loaded kit's master effects, ECHO, REV, EQ and DYN.</em>
 </p>
 
 - **Header:** the selected track's machine (click it for the machine picker), the loaded kit and its bank (click it for
