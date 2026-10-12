@@ -125,33 +125,41 @@ hand; the slice ran under Rosetta on Apple Silicon (`arch -x86_64`). An arm64 CM
 test command. OS 1.63:
 
 - `md-hash`: `hash 04ef1db4fe767721`, also with `MD_GROUPS=2` and `4`.
-- ctest: romart, firmware, golden-hash, kits, jit, resampler, plugin-os-load and plugin-editor pass.
-- **Finding 1 (lockstep).** `MD_JIT_LOCKSTEP=1 md-hash` reports a first difference that the aarch64 JIT does not have:
-  after JIT block 136872 (P:$1038c0 to $1038ca, instruction 5596681) `sr jit=80044 interp=80040`, i.e. Z is set on the
-  x64 JIT. The block is a `DO #$22` loop in one machine's set-up code: per iteration two table words are loaded and
-  each is shifted left by 12 with LSL. All other registers agree and the last shifted values are not zero, so Z should
-  be clear (the interpreter and the aarch64 JIT say so). Cause, from reading the source (not yet confirmed by a run:
-  Rosetta stopped working, see below): `alu_lsl` and `alu_lsr` in `jitops_alu_x64.cpp` open a
-  `CcrBatchUpdate(N | C | V)`, which clears those bits up front and switches `ccr_update()` to OR-only; Z is not in
-  the mask, yet both ops set it with `ccr_update_ifZero(CCRB_Z)`, so an earlier Z = 1 (a zero table word in the loop)
-  is never cleared by a later non-zero result. The fix would be `CCR_Z` in both masks (lines 144 and 168), with a case
-  in `tests/test_jit.cpp` (LSL of zero, then of a non-zero value, compared with the interpreter; the aarch64 versions
-  have no batch). The golden hash is unaffected (the voice program does not read Z there), but lockstep stops at the
-  first difference, so nothing after it has been compared.
-- **Finding 2 (crashes).** `plugin-render` and `plugin-state` (`MdPluginCheck`) died with SIGSEGV, a null dereference
-  in JIT-generated code on the main thread, in the one full ctest run made while the Mac was heavily loaded. They passed
-  in every serial run after (4 of render, 15 of state); with 8 copies running at once, `--check-render` crashed in 21 of
-  24 runs and `--check-state` in 0 of 24. On arm64 nothing crashes, also not with `MallocScribble`. Whether this is a
-  bug in the x64 JIT or Rosetta's handling of self-modifying code (asmjit does not use `MAP_JIT` in a non-hardened
-  x86_64 process, so the JIT memory is plain RWX, which Rosetta has to track) is not settled. An interpreter-only
-  x86_64 build (`-DCMAKE_OSX_ARCHITECTURES=x86_64 -DMD_USE_JIT=OFF`) under the same parallel load separates the two,
-  and an Intel Mac settles it.
-- **Caution.** Do not attach lldb to the x86_64 slice: the session hung (0 % CPU, debugserver under Rosetta), and after
-  it was killed this Mac's Rosetta translator stopped starting binaries it had not seen before (a freshly compiled
-  hello world too: processes stuck in the kernel at exec, state U, which `kill -9` does not end) until `oahd` is
-  restarted (`sudo killall oahd`) or the Mac reboots. Whether the lldb session caused it is not known.
+- ctest, one run at a time: all 10 pass on the x86_64 slice (romart, firmware, golden-hash, kits, jit, resampler,
+  plugin-os-load, plugin-render, plugin-state, plugin-editor).
+- **Finding 1 (lockstep): a real x64 JIT bug, found, fixed in a scratch tree, not yet in the patch.**
+  `MD_JIT_LOCKSTEP=1 md-hash` reports a first difference that the aarch64 JIT does not have: after JIT block 136872
+  (P:$1038c0 to $1038ca, instruction 5596681) `sr jit=80044 interp=80040`, i.e. Z is set on the x64 JIT. The block is a
+  `DO #$22` loop in one machine's set-up code: per iteration two table words are loaded and each is shifted left by 12
+  with LSL; all other registers agree and the last shifted values are not zero, so Z should be clear. Cause: `alu_lsl`
+  and `alu_lsr` in `jitops_alu_x64.cpp` (lines 144 and 168 of the patched file) open a `CcrBatchUpdate(N | C | V)`, which
+  clears those bits up front and switches `ccr_update()` to OR-only, but both set Z with `ccr_update_ifZero(CCRB_Z)`:
+  a Z = 1 from an earlier zero word is never cleared by a later non-zero result. With `CCR_Z` added to both masks
+  the x86_64 lockstep runs through the whole golden pattern without a difference (hash unchanged), and
+  `MD_SWEEP=1 MD_JIT_LOCKSTEP=1` over all 135 machines prints exactly the arm64 sweep with no lockstep report. To do:
+  put the two-line change into `ext/patches/0001-dsp56300-md.patch` and add a case to `tests/test_jit.cpp` (LSL and LSR
+  of zero, then of a non-zero value, JIT against interpreter; it fails on x64 without the fix, passes on arm64
+  either way), then run it under Rosetta. The golden hash was never affected (the voice program does not read Z there).
+- **Finding 2 (crashes) was not the JIT, nor x64, nor Rosetta: the plugin checks cannot run twice at once.** The first
+  full Rosetta ctest run, made while other sessions were using the Mac, died with SIGSEGV in plugin-render and
+  plugin-state, and 8 parallel copies crashed `--check-render` in 21 of 24 runs. The same 8 parallel loops crash the
+  native arm64 build (`--check-render` 21 of 24, `--check-state` failing 3 times) and an interpreter-only x86_64 build
+  alike. Cause: every check keeps its settings in a fixed folder (`md-plugin-check-render`, `-state`, ... under JUCE's
+  temp directory, `~/Library/Caches/<executable name>` on macOS) and deletes it at the start and the end, so two runs
+  delete each other's OS-file setting; `render` then reports "no engine: No Machinedrum OS file selected" and
+  `checkRender` goes on to read the first channel of an empty result (null dereference; lldb on the native build
+  stopped in `checkRender`). Eight parallel loops with each its own copy of the executable (so its own folder): 48 of 48
+  pass. A user's real settings are never touched (`MD_SETTINGS_DIR`). To do, in `src/plugin/Check.cpp`: give each
+  run a folder of its own (the process id in the name) and fail the check instead of reading an empty render. Until
+  then, run one `ctest` at a time on a Mac (two worktrees count).
+- **Caution.** Attaching lldb to the x86_64 slice hung (0 % CPU, debugserver under Rosetta); after it was killed
+  Rosetta stopped starting binaries it had not seen before (a freshly compiled hello world too: processes stuck in
+  the kernel at exec, state U, which `kill -9` does not end). It cleared by itself after about 40 minutes; whether the
+  lldb session caused it is not known. Native lldb on arm64 is fine.
 
-So the x86_64 slice is experimental: the release script builds arm64 unless told `-a universal`, and the README says so.
+So the repo's x86_64 slice is still opt-in (the release script builds arm64 unless told `-a universal`, the README says
+so): the patch lacks the Z fix and there has been no Intel hardware. Once the patch has it and the test is in, the
+universal build can become the default.
 
 ## Decisions (made, not to be re-litigated without a reason)
 
@@ -181,7 +189,7 @@ So the x86_64 slice is experimental: the release script builds arm64 unless told
   addresses only after checking the ColdFire section's size and hash.
 - **The processor must never take the engine lock from the message thread for display** (the old status line did, and
   the audio thread dropped blocks); the editor reads atomics.
-- **Packaging:** releases are arm64 until the x64 JIT is verified (the universal build exists and is opt-in). The build
+- **Packaging:** releases are arm64 until the x64 JIT patch has its Z fix and has run on Intel (the universal build exists and is opt-in). The build
   signs the bundles itself (hardened runtime; the JIT entitlements only stick to the standalone app, plugins run on their
   host's), the installer installs system-wide (AU, VST3, app), and the `.zip` is made after notarization and stapling.
 - **Voice budget, silence release and voice-group splitting stay off** (not hardware behaviour, or not bit-exact).
@@ -215,8 +223,9 @@ verification of their claims.
   /Library/Audio/Plug-Ins, the app to /Applications) and a `.zip` of the three bundles; `-n` notarizes and staples
   (needs the owner's Developer ID certificates and a `notarytool` keychain profile, untested here);
   `.github/workflows/build.yml` builds and tests on an Apple Silicon runner and uploads the bundles; the README has
-  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the two x64 findings above (the
-  default release is arm64 until they are explained), loading the packaged build in a DAW, and the owner's certificates.
+  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the x64 Z-flag fix in the
+  JIT patch with its test, and the checks' shared temp folders (both above; the default release is arm64 until the first
+  is in), loading the packaged build in a DAW, and the owner's certificates.
 - **0009 Master effects.** The Machinedrum's master section (rhythm echo, gate box/reverb, master EQ, dynamix) runs on
   the mixer DSP (DSP1) and is not emulated; the reverb and delay sends come out as their own buses instead. Options:
   run DSP1's own program in a second emulated DSP, or translate it to C++ as the per-track chain was. The MPC port's
