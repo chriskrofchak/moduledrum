@@ -173,6 +173,10 @@ Work is planned and logged with [clew](https://github.com/npatten/clew). `.clew/
 priority order (`.clew/path.md`), and `.clew/archive/` the finished increments with their decisions, measurements and
 regression hashes. With clew installed, `clew list` shows what's next.
 
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) is the summary for anyone picking the project up: where the code comes
+from, the regression hashes and how to run the checks, what has been measured, the decisions that were made and why
+(including the JIT work and the dsp56300 patch), and the open work.
+
 ## Licence
 
 Moduledrum is free software: you can redistribute it and/or modify it under the terms of the
