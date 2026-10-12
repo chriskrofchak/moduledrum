@@ -109,7 +109,7 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
   out), its output is `Engine::Output::master`, and the dry outputs, their hashes and the plugin's are untouched: it is an
   extra stage after the mixer. Checked: JIT = interpreter, and master-only = DSP1's whole main loop, word for word (table
   above). Cost: **11.8 us a block** on the JIT (`md-hash`: 590 -> 800 ms per 12 s of audio, 4.9 -> 6.7 % of real time;
-  143 us on the interpreter), ~90 MB, 55 ms to build (6 ms boot, then a warm-up that compiles every JIT block (672 entry points) over
+  74-81 us on the interpreter build), ~90 MB, 55 ms to build (6 ms boot, then a warm-up that compiles every JIT block (672 entry points) over
   synthetic signals and puts DSP memory back, so that a live block compiles and allocates nothing). The pass is not
   level-neutral against the dry bus (dry goes through EQ, dynamix and GAIN too; the cleared kit is about -2.6 dB) and the
   dry path comes out `master::kDryLatency` = 18 frames late. The plugin and editor side is still to do (increment 0009).

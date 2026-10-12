@@ -471,7 +471,7 @@ Step 1 (`ctest master`, OS file only):
   Y:$150-$1c1 after every block: **2 904 000 words compared, 0 differences** (968 000 per kit).
 - (c) `mfx_block_cost_and_no_compile`: warm-up 40-46 ms, the cold first block 7.3 ms; 4000 live blocks over 100 random kits:
   **median 9.6-10.9 us, mean 10.0-11.0 us, p99 12-14 us, max 30-84 us (a scheduling outlier); 0 mallocs in all 4000**
-  (macOS `malloc_logger`; a JIT compile allocates). On the interpreter build: median < 400 us (143 us measured in the spike).
+  (macOS `malloc_logger`; a JIT compile allocates). On the interpreter build (LTO): median 74 us, p99 90 us, 0 mallocs (the spike measured 143 us without LTO); `md-hash` 81 us a block.
   `gmaster_no_compile_while_playing`: `compiledBlocks()` (compiled entry points) = 672 after construction and still 672 after the golden pattern and 6000
   blocks of changing kits and tempi.
 - (d) `md-hash` `04ef1db4fe767721` on the JIT, the interpreter, `MD_GROUPS=2` and `4`, with the master stage built or not.
