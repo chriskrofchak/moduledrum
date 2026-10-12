@@ -8,7 +8,8 @@
 //       setting. Exit code 77 (skipped) without an OS file. Uses a temporary MD_SETTINGS_DIR, never the user's settings.
 //
 //   md-plugin-check --check-render [--fw os.syx]
-//       Pass/fail, the audio path (.clew increment 0003): a fixed note sequence on all 16 tracks rendered through the
+//       Pass/fail, the audio path (.clew increment 0003), with master_fx off (the dry main bus; --check-master has it on):
+//       a fixed note sequence on all 16 tracks rendered through the
 //       processor at 44.1 kHz must give kRenderHashOs163 (main output), whatever the host's block size; at 48 and 96 kHz
 //       the output must be exactly the 44.1 kHz render taken through the converter, with the latency the processor
 //       reports (and so the same peak, energy, timing and length); a track on its own bus leaves the main mix and
@@ -20,22 +21,36 @@
 //       Pass/fail, parameters and state (.clew increment 0004): the parameter layout (ids, groups, names, ranges,
 //       defaults, getName's cost); a machine change as a host makes it (the engine plays the machine's SYN defaults at
 //       once, the SYN parameters follow and are renamed on the message thread, the host is told, SYN values set since are
-//       kept; the machine parameters are meta parameters); an edited session saved and restored (every parameter, the
-//       same state bytes, the same sound); a schema 1 state. With a kit snapshot (--kits, else $MD_KITS_SYX): every kit
-//       loaded and exported is the same dump byte for byte; kit 0 played through the processor gives
-//       kKit0ProcessorHashOs163, the same as md::library::applyKit on the engine with the processor's warm-up (and
-//       tests/test_kits.cpp's kKit0Hash without it), and again after its state is restored into a fresh processor. Exit
-//       code 77 (skipped) without an OS file.
+//       kept; the machine parameters are meta parameters); the master effects' parameters (.clew increment 0009); an
+//       edited session saved and restored (every parameter, the same state bytes, the same sound); a schema 2 state (the
+//       init kit's master bytes) and a schema 1 state. With a kit snapshot (--kits, else $MD_KITS_SYX): every kit loaded
+//       (its master bytes included) and exported is the same dump byte for byte; kit 0 played through the processor with
+//       the master off gives kKit0ProcessorHashOs163, the same as md::library::applyKit on the engine with the
+//       processor's warm-up (and tests/test_kits.cpp's kKit0Hash without it), and again after its state is restored into
+//       a fresh processor. Exit code 77 (skipped) without an OS file.
+//
+//   md-plugin-check --check-master [--fw os.syx] [--kits kits.syx]
+//       Pass/fail, the master effects in the plugin (.clew increment 0009): master_fx on by default; the latency (18
+//       samples at 44.1 kHz, the conversion's and the 18 engine frames as one delay at 48 and 96 kHz) and the tail follow
+//       it; the first live callback after an OS load compiles nothing in the master DSP; the regression render with the
+//       master on gives kMasterRenderHashOs163 / kMasterRenderHashWhiteKeysOs163 (any host block size; at 48 and 96 kHz
+//       the 44.1 kHz render through the converter); a GND-IM impulse lands on the same engine frame on the main bus, a
+//       track bus and both send buses; the track and send buses are the master-off render's, sample for sample; master
+//       edits change the sound only with the master on; switching it while playing. With a kit snapshot: kit 0 through
+//       the processor with the master on is the engine's master output (applyKit, the kit's master bytes,
+//       EngineT::primeMaster), the sends lined up with it. Exit code 77 (skipped) without an OS file.
 //
 //   md-plugin-check --bench [seconds] [--fw os.syx]
 //       CPU use with all 16 tracks triggered 8 times per beat at 120 BPM: the processor at a 64-sample host buffer at
-//       44.1, 48 and 96 kHz (mean and worst callback against its real-time budget, and the heap allocations in
-//       processBlock after the first second, the JIT's apart: see --check-rt), and the engine alone for reference.
+//       44.1, 48 and 96 kHz with the master effects on, as it ships (mean and worst callback against its real-time
+//       budget, and the heap allocations in processBlock after the first second, the JIT's apart: see --check-rt), and
+//       for reference the engine alone (master section included) and the processor at 44.1 kHz with the master off.
 //
 //   md-plugin-check --check-rt [--fw os.syx]
 //       Pass/fail, the real-time path (.clew increment 0014): no heap allocation in processBlock (operator new, and on
 //       macOS every malloc) at 44.1, 48 and 96 kHz and several block sizes, with notes on every track, editor keys,
-//       automation, tempo and machine changes; only the DSP's JIT may allocate, when it compiles a block the first
+//       automation, tempo and machine changes, master edits, a kit load (the master primed) and master_fx switched off
+//       and on; only the DSP's JIT may allocate, when it compiles a block the first
 //       time the voice program reaches it (counted apart). MD_RT_ALLOC_TRACE=1 prints the call stacks of the first
 //       allocations. Exit code 77 (skipped) without an OS file, or off macOS (needs malloc_logger).
 //
@@ -70,6 +85,7 @@
 #include <cstdlib>
 #include <functional>
 #include <optional>
+#include <set>
 #include <thread>
 #include <vector>
 #include "golden/GoldenPattern.h"
@@ -81,6 +97,7 @@
 #include "ScaledEditor.h"
 #include "SharedSettings.h"
 #include "dsp/Resampler.h"
+#include "dsp56kEmu/dspconfig.h"
 
 using md::plugin::one::MdOneProcessor;
 
@@ -236,6 +253,9 @@ struct RenderOptions {
     std::optional<double> tempo = 120.0;   // the processor's tempo setting
     std::optional<int> midiChannel = 10;
     std::optional<MdOneProcessor::NoteMap> noteMap = MdOneProcessor::NoteMap::Chromatic;   // set explicitly: each map has its own hash
+    // master_fx, applied with the globals. Off by default: the main bus is then the dry mix, as when these hashes were
+    // recorded (before the master effects); --check-master records its own with it on
+    std::optional<bool> masterFx = false;
     bool allBuses = false;    // every track bus (mono) and both sends on
     bool testKit = true;      // the test kit (else the processor's default kit, or what `setup` loads)
     std::function<void(MdOneProcessor&)> setup;   // after the test kit
@@ -263,6 +283,7 @@ Render render(const std::vector<Note>& notes, int64_t frames, const RenderOption
     if (o.midiChannel) p.setMidiChannel(*o.midiChannel);
     if (o.noteMap) p.setNoteMap(*o.noteMap);
     if (o.tempo) p.setTempo(*o.tempo);
+    if (o.masterFx) p.setMasterOn(*o.masterFx);
     if (o.allBuses) {
         auto layout = p.getBusesLayout();
         for (int b = 1; b < MdOneProcessor::kNumBuses; ++b)
@@ -638,7 +659,7 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         MdOneProcessor p;
         const auto& ps = p.getParameters();
         check(ps.size() == params::kTotal, "parameter count " + juce::String(ps.size()) + " (16 x " + juce::String(params::kTrackParams) + " + "
-              + juce::String(params::kGlobals) + ")");
+              + juce::String(params::kGlobals) + " + " + juce::String(params::kMasterGroupParams) + ")");
         bool idsOk = true, rangesOk = true, namesOk = true, automatable = true;
         juce::StringArray ids;
         for (int t = 0; t < 16; ++t)
@@ -657,22 +678,43 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
             if (q != nullptr) ids.add(q->getParameterID());
             automatable = automatable && ps[i]->isAutomatable();
         }
-        const auto globalsOk = ids.size() == params::kTotal && ids[params::kTotal - 4] == "tempo" && ids[params::kTotal - 3] == "midi_channel"
-                             && ids[params::kTotal - 2] == "accent" && ids[params::kTotal - 1] == "note_map";
+        constexpr int g0 = params::kTracks * params::kTrackParams, m0 = g0 + params::kGlobals;   // the globals, then the master effects
+        const auto globalsOk = ids.size() == params::kTotal && ids[g0] == "tempo" && ids[g0 + 1] == "midi_channel" && ids[g0 + 2] == "accent"
+                             && ids[g0 + 3] == "note_map" && ids[m0] == "master_fx" && ids[m0 + 1] == "fx_rev_dvol" && ids[m0 + 8] == "fx_rev_lev"
+                             && ids[m0 + 9] == "fx_echo_time" && ids[m0 + 13] == "fx_echo_filtf" && ids[m0 + 17] == "fx_eq_lf" && ids[m0 + 24] == "fx_eq_gain"
+                             && ids[m0 + 25] == "fx_dyn_atck" && ids[m0 + 32] == "fx_dyn_mix";
+        bool masterOk = &p.masterOnParameter() == ps[m0] && p.masterOnParameter().get() && p.masterOnParameter().getName(64) == "MASTER FX";
+        for (int i = 0; i < MdOneProcessor::kMasterParams && masterOk; ++i) {
+            const auto& q = p.masterParameter(i);
+            masterOk = &q == ps[m0 + 1 + i] && q.getParameterID() == params::masterId(i) && q.getName(64) == params::masterName(i)
+                    && q.getRange() == juce::Range<int>(0, 127) && q.get() == md::engine::master::kDefaultParams[size_t(i)]
+                    && juce::roundToInt(q.convertFrom0to1(asBase(q).getDefaultValue())) == md::engine::master::kDefaultParams[size_t(i)];
+        }
         ids.removeDuplicates(false);
         check(idsOk && globalsOk && ids.size() == params::kTotal, "ids in order and unique: track0_machine, track0_syn1 .. track0_lfom, track0_level, "
-              "track0_lfo_track .. track0_lfo_type, ..., tempo, midi_channel, accent, note_map");
+              "track0_lfo_track .. track0_lfo_type, ..., tempo, midi_channel, accent, note_map, master_fx, fx_rev_dvol .. fx_rev_lev, fx_echo_time .. "
+              "fx_echo_lev, fx_eq_lf .. fx_eq_gain, fx_dyn_atck .. fx_dyn_mix");
+        check(masterOk, "the master effects: MASTER FX on; 32 bytes 0-127 named \"" + p.masterParameter(0).getName(64) + "\" .. \""
+              + p.masterParameter(8).getName(64) + "\" .. \"" + p.masterParameter(31).getName(64) + "\", defaulting to the init kit's (a cleared MD kit's)");
         check(rangesOk, "ranges: machine 0-191, kit parameters and LEV 0-127, LFO track 0-15, param 0-23, shapes 0-5, update 0-2");
         check(namesOk, "names: \"" + p.parameter(0, params::kMachine).getName(64) + "\", \"" + p.parameter(0, params::kKit).getName(64) + "\" .. \""
               + p.parameter(0, params::kKit + 8).getName(64) + "\" .. \"" + p.parameter(15, params::kLevel).getName(64) + "\", \""
               + p.parameter(15, params::kLfo + 4).getName(64) + "\" (SYN1-8 after the machine's knobs)");
         check(automatable, "every parameter automatable");
         const auto groups = p.getParameterTree().getSubgroups(false);
-        bool groupsOk = groups.size() == 17;
-        for (int g = 0; g < groups.size() && groupsOk; ++g)
+        bool groupsOk = groups.size() == 18;
+        for (int g = 0; g < 17 && groupsOk; ++g)
             groupsOk = groups[g]->getName() == (g < 16 ? "T" + juce::String(g + 1) : juce::String("Global"))
                     && groups[g]->getParameters(false).size() == (g < 16 ? params::kTrackParams : params::kGlobals);
-        check(groupsOk, "groups T1..T16 (31 each) and Global (4)");
+        if (groupsOk) {   // Master FX: master_fx, then REV, ECHO, EQ, DYN of 8 each
+            const auto* m = groups[17];
+            const auto sub = m->getSubgroups(false);
+            groupsOk = m->getName() == "Master FX" && m->getParameters(false).size() == 1 && m->getParameters(true).size() == params::kMasterGroupParams
+                    && sub.size() == params::kMasterBlocks;
+            for (int b = 0; b < sub.size() && groupsOk; ++b)
+                groupsOk = sub[b]->getName() == params::kMasterBlockNames[size_t(b)] && sub[b]->getParameters(false).size() == params::kMasterBlockParams;
+        }
+        check(groupsOk, "groups T1..T16 (31 each), Global (4) and Master FX (MASTER FX and the sub-groups REV, ECHO, EQ, DYN of 8 each)");
         bool meta = true;
         for (int i = 0; i < ps.size(); ++i) meta = meta && ps[i]->isMetaParameter() == (i < params::kTracks * params::kTrackParams && i % params::kTrackParams == params::kMachine);
         check(meta, "the 16 machine parameters, which rewrite SYN1-8, are meta parameters (AU: IsGlobalMeta), no other one is");
@@ -780,6 +822,8 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
             p.setTrackLevel(9, 77);
             p.setAccent(40);
             p.setTrackOutput(4, true);
+            p.setMasterFx(9, 5);      // echo MOD
+            p.setMasterFx(31, 64);    // dynamix MIX
         };
         edit.after = [&](MdOneProcessor& p) { saved = stateOf(p); before = parameterValues(p); };
         const auto seq = testSequence();
@@ -790,26 +834,48 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         std::vector<float> after;
         RenderOptions restore = edit;
         restore.testKit = false;
-        // channel, note map and tempo come from the restored state alone: render() must not set them again
+        // channel, note map, tempo and master_fx come from the restored state alone: render() must not set them again
         restore.midiChannel = std::nullopt;
         restore.noteMap = std::nullopt;
         restore.tempo = std::nullopt;
+        restore.masterFx = std::nullopt;
         restore.setup = [&](MdOneProcessor& p) { p.setStateInformation(saved.getData(), int(saved.getSize())); };
         restore.after = [&](MdOneProcessor& p) {
             again = stateOf(p);
             after = parameterValues(p);
-            check(p.midiChannel() == 3 && p.noteMap() == NoteMap::Chromatic && std::abs(p.tempo() - 133.5) < 1e-3,
-                  "a schema 2 state restores the MIDI channel (3), note map (chromatic) and tempo (133.5)");
+            check(p.midiChannel() == 3 && p.noteMap() == NoteMap::Chromatic && std::abs(p.tempo() - 133.5) < 1e-3 && !p.masterOn()
+                      && p.masterFx(9) == 5 && p.masterFx(31) == 64,
+                  "a schema 3 state restores the MIDI channel (3), note map (chromatic), tempo (133.5), master_fx (off) and the master bytes");
         };
         const auto b = render(notes, kSequenceFrames, restore);
         check(before.size() == size_t(params::kTotal) && before == after, "an edited session: every parameter restored");
         check(saved == again, "its state saved again is the same bytes (" + juce::String(int(saved.getSize())) + " bytes)");
         check(a.ok && b.ok && hashMain(a) == hashMain(b) && !silentOf(a.ch[0]), "and it renders the same (" + hex(hashMain(a)) + ")");
         const auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), int(saved.getSize()));
-        check(xml != nullptr && xml->getIntAttribute("schema") == 2 && xml->getChildByName("PARAMETERS") != nullptr
+        check(xml != nullptr && xml->getIntAttribute("schema") == 3 && xml->getChildByName("PARAMETERS") != nullptr
               && xml->getChildByName("PARAMETERS")->getNumChildElements() == params::kTotal && xml->getChildByName("KIT") != nullptr
               && xml->getIntAttribute("ownBusTracks") == 16 && !xml->toString().contains(os),
-              "state: schema 2, 500 PARAMs, the KIT, ownBusTracks; no OS path");
+              "state: schema 3, " + juce::String(params::kTotal) + " PARAMs, the KIT, ownBusTracks; no OS path");
+        // the same session as a schema 2 state (increment 0004: no master parameters): the init kit's master bytes, master_fx on
+        if (xml != nullptr) {
+            auto old2 = *xml;
+            old2.setAttribute("schema", 2);
+            auto* values = old2.getChildByName("PARAMETERS");
+            for (auto* e = values->getFirstChildElement(); e != nullptr;) {
+                auto* next = e->getNextElement();
+                const auto id = e->getStringAttribute("id");
+                if (id.startsWith("fx_") || id == "master_fx") values->removeChildElement(e, true);
+                e = next;
+            }
+            juce::MemoryBlock state2;
+            juce::AudioProcessor::copyXmlToBinary(old2, state2);
+            MdOneProcessor p2;
+            p2.setStateInformation(state2.getData(), int(state2.getSize()));
+            bool init = p2.masterOn();
+            for (int i = 0; i < MdOneProcessor::kMasterParams; ++i) init = init && p2.masterFx(i) == md::engine::master::kDefaultParams[size_t(i)];
+            check(init && values->getNumChildElements() == params::kTracks * params::kTrackParams + params::kGlobals && p2.midiChannel() == 3 && p2.trackLevel(9) == 77,
+                  "a schema 2 state (" + juce::String(values->getNumChildElements()) + " PARAMs) restores its parameters, the init kit's master bytes and master_fx on");
+        }
         // schema 1 (increment 0003): the settings it had
         MdOneProcessor p;
         juce::XmlElement old("ModuledrumState");
@@ -839,7 +905,8 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
     {
         // every kit: loaded through the processor, the parameters hold its values; exported, it is the same kit dump
         MdOneProcessor p;
-        int same = 0, valuesOk = 0;
+        int same = 0, valuesOk = 0, masterOk = 0;
+        std::set<std::array<uint8_t, 32>> masterSets;
         for (const auto& k : bank.kits) {
             p.loadKit(k, juce::String(bank.name));
             bool v = true;
@@ -850,9 +917,17 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
                     if (f != nullptr) v = v && p.parameter(t, slot).get() == int(*f);
                 }
             valuesOk += v ? 1 : 0;
+            // the master bytes: in the parameters (kit order), and back out of them into the kit
+            const auto bytes = k.masterFx.bytes();
+            bool m = p.parametersToKit().masterFx.bytes() == bytes;
+            for (int i = 0; i < MdOneProcessor::kMasterParams; ++i) m = m && p.masterFx(i) == int(bytes[size_t(i)]);
+            masterOk += m ? 1 : 0;
+            masterSets.insert(bytes);
             same += md::library::encodeKit(p.parametersToKit()) == md::library::encodeKit(k) ? 1 : 0;
         }
         check(valuesOk == int(bank.kits.size()), "every kit loaded: machines, parameters and levels in the parameters (" + juce::String(valuesOk) + " kits)");
+        check(masterOk == int(bank.kits.size()) && masterSets.size() > 2, "every kit's 32 master bytes: in the master parameters, and back in parametersToKit ("
+              + juce::String(masterOk) + " kits, " + juce::String(int(masterSets.size())) + " different master settings)");
         check(same == int(bank.kits.size()), "every kit exported (parametersToKit + encodeKit) is the same dump byte for byte (" + juce::String(same) + " kits)");
         // kit 0 exported and decoded: the same parameter values; an edit shows in the export
         p.loadKit(kit0, juce::String(bank.name));
@@ -868,12 +943,15 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
               "kit 0 (" + p.kitName() + ", bank " + p.kitBank() + ") exported with encodeKit decodes to the same machines, parameters, levels and LFO pages");
         p.setTrackParam(3, 17, 12);
         p.setMachine(7, 33);
+        p.setMasterFx(10, 99);   // echo MFRQ
         const auto edited = p.parametersToKit();
-        check(edited.params[3][17] == 12 && edited.machine[7] == 33 && edited.params[7][0] == p.synDefault(33, 0) && edited.params[0] == kit0.params[0],
-              "an edit (VOL, a machine change with its SYN defaults) is in the export, the rest unchanged");
+        check(edited.params[3][17] == 12 && edited.machine[7] == 33 && edited.params[7][0] == p.synDefault(33, 0) && edited.params[0] == kit0.params[0]
+                  && edited.masterFx.delay[2] == 99 && edited.masterFx.reverb == kit0.masterFx.reverb && edited.masterFx.dynamics == kit0.masterFx.dynamics,
+              "an edit (VOL, a machine change with its SYN defaults, echo MFRQ) is in the export, the rest unchanged");
     }
     {
-        // kit 0 played through the processor: the kit test's hash, the same as straight on the engine with the same warm-up
+        // kit 0 played through the processor, master_fx off (the dry main bus): the kit test's hash, the same as straight
+        // on the engine with the same warm-up (--check-master plays it with the master on)
         juce::MemoryBlock saved;
         RenderOptions o;
         o.testKit = false;
@@ -889,7 +967,7 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         const auto ha = hashKitTest(a);
         const auto direct = directKitTest(os, kit0, MdOneProcessor::kWarmUpBlocks);
         const auto plain = directKitTest(os, kit0, 0);
-        check(a.ok && ha == kKit0ProcessorHashOs163, "kit 0 through the processor (" + juce::String(int(seq.size())) + " notes, 12 s): hash " + hex(ha)
+        check(a.ok && ha == kKit0ProcessorHashOs163, "kit 0 through the processor, master off (" + juce::String(int(seq.size())) + " notes, 12 s): hash " + hex(ha)
               + ", expected " + hex(kKit0ProcessorHashOs163) + " (peak " + juce::String(20.0 * std::log10(double(peakOf(a.ch[0]))), 1) + " dBFS)");
         check(ha == direct, "the same as applyKit straight on the engine after the processor's " + juce::String(MdOneProcessor::kWarmUpBlocks)
               + " warm-up blocks (" + hex(direct) + ")");
@@ -902,6 +980,285 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         const auto b = render(seq, frames, r);
         check(b.ok && hashKitTest(b) == ha, "state saved, restored into a fresh processor, rendered again: the same hash (" + hex(hashKitTest(b)) + "), kit "
               + restoredKit);
+    }
+    settingsDir.deleteRecursively();
+    return g_failures ? 1 : 0;
+}
+
+// ---- The master effects (--check-master) ----
+
+juce::String kitsFileOf(const juce::String& kitsPath);   // the editor's section
+
+// The regression render (testSequence on the test kit, which leaves the master bytes at the init kit's) with master_fx on:
+// the main output at 44.1 kHz with OS 1.63, the reported latency removed, hashed as hashMain hashes it. One per note map,
+// as kRenderHashOs163 / kRenderHashWhiteKeysOs163 are the same renders with the master off.
+constexpr uint64_t kMasterRenderHashOs163 = 0xece6201f17cf1b81ull;            // NoteMap::Chromatic
+constexpr uint64_t kMasterRenderHashWhiteKeysOs163 = 0x7fd32e31f89ea574ull;   // NoteMap::WhiteKeys
+// Kit 0 of the user's snapshot through the processor with the master on (as kKit0ProcessorHashOs163, hashKitTest): the
+// main bus is the master output at the kit's master settings
+constexpr uint64_t kKit0MasterProcessorHashOs163 = 0x288d02a442ac6b0bull;
+
+// The first frame with a non-zero sample, -1 for silence
+int64_t onsetOf(const std::vector<float>& x)
+{
+    const auto it = std::find_if(x.begin(), x.end(), [](float v) { return v != 0.f; });
+    return it == x.end() ? -1 : int64_t(it - x.begin());
+}
+
+// The kit test straight on the engine with the kit's master effects, as the processor does a kit load: directKitTest's
+// steps, then the kit's 32 master bytes (HostModel::setMasterFx) and EngineT::primeMaster. Hashed as hashKitTest hashes a
+// processor render with the master on and its latency removed: the master output kMasterLatency frames on (its dry path is
+// that late, and the processor lines the other buses up with it), the sends as the mixer made them.
+uint64_t directKitTestMaster(const juce::String& os, const md::library::Kit& kit, int warmUp)
+{
+    const std::filesystem::path path(os.toStdString());
+    const auto firmware = md::fw::loadFirmware(path);
+    auto c = md::fw::parseContainer(md::fw::parseSysex(md::fw::readFile(path)));
+    md::engine::Engine eng(firmware, std::move(c.sections.at(0).data));
+    md::engine::Engine::Output out;
+    for (int b = 0; b < warmUp; ++b) eng.render(out);
+    md::library::applyKit(eng.host(), kit);
+    const auto bytes = kit.masterFx.bytes();
+    for (int i = 0; i < MdOneProcessor::kMasterParams; ++i) eng.host().setMasterFx(i, bytes[size_t(i)]);
+    eng.primeMaster();
+    md::golden::Pattern pattern;
+    std::vector<std::array<int32_t, 2>> main, rev, del;
+    for (int b = 0; b < md::golden::kBlocks + 1; ++b) {   // one block more: the master output's last frames
+        if (b < md::golden::kBlocks) pattern.beforeBlock(eng.host(), b);
+        eng.render(out);
+        for (int f = 0; f < 32; ++f) {
+            main.push_back({out.master[size_t(f)][0], out.master[size_t(f)][1]});
+            rev.push_back({out.mix.rev[size_t(f)][0], out.mix.rev[size_t(f)][1]});
+            del.push_back({out.mix.del[size_t(f)][0], out.mix.del[size_t(f)][1]});
+        }
+    }
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](int64_t v) { h ^= uint64_t(v); h *= 1099511628211ull; };
+    for (size_t i = 0; i < size_t(md::golden::kBlocks) * 32; ++i)
+        for (size_t c2 = 0; c2 < 2; ++c2) {
+            mix(main[i + MdOneProcessor::kMasterLatency][c2]);
+            for (int q = 0; q < 6; ++q) mix(0);
+            mix(rev[i][c2]);
+            mix(del[i][c2]);
+        }
+    return h;
+}
+
+int checkMaster(const juce::String& os, const juce::String& kitsPath)
+{
+    if (os.isEmpty() || !juce::File(os).existsAsFile()) {
+        std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n");
+        return 77;
+    }
+    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-master");
+    settingsDir.deleteRecursively();
+    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    md::plugin::saveSharedOsPath(os);
+    using NoteMap = MdOneProcessor::NoteMap;
+    constexpr int kLatency = MdOneProcessor::kMasterLatency;
+
+    // master_fx on by default; the latency and the tail follow it; the first live callback compiles nothing in the master
+    {
+        MdOneProcessor p;
+        const auto expectLag = [](double rate) { return rate == 44100.0 ? kLatency : int(std::ceil((36.0 + kLatency) * rate / 44100.0)); };
+        p.setRateAndBufferSizeDetails(44100.0, 512);
+        p.prepareToPlay(44100.0, 512);
+        check(p.engineReady() && p.masterOn() && p.masterActive() && p.getLatencySamples() == kLatency && p.getTailLengthSeconds() == MdOneProcessor::kMasterTailSeconds,
+              "master_fx on by default: latency " + juce::String(p.getLatencySamples()) + " samples at 44.1 kHz (the master's dry path), tail "
+              + juce::String(p.getTailLengthSeconds(), 1) + " s");
+        const int compiled = p.masterCompiledBlocks();
+        juce::AudioBuffer<float> buf(p.getTotalNumOutputChannels(), 512);
+        juce::MidiBuffer midi;
+        const auto t0 = std::chrono::steady_clock::now();
+        p.processBlock(buf, midi);
+        const double first = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::vector<double> times;
+        for (int b = 0; b < 64; ++b) {
+            const auto t1 = std::chrono::steady_clock::now();
+            p.processBlock(buf, midi);
+            times.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
+        }
+        std::sort(times.begin(), times.end());
+        const bool jit = dsp56k::g_jitSupported;   // the interpreter build compiles nothing
+        check((jit ? compiled > 0 && p.masterCompiledBlocks() == compiled : compiled == 0) && first < 5e-3,
+              "the first live callback after the OS load (512 samples, 16 engine blocks): " + juce::String(first * 1e6, 0) + " us (median of the next 64: "
+              + juce::String(times[times.size() / 2] * 1e6, 0) + " us); " + (jit ? "the master DSP's " + juce::String(compiled)
+              + " compiled JIT blocks unchanged (" + juce::String(p.masterCompiledBlocks()) + "): its warm-up compiled them" : juce::String("interpreter: no JIT")));
+        p.setMasterOn(false);
+        check(!p.masterActive() && p.getLatencySamples() == 0 && p.getTailLengthSeconds() == 0.0, "master_fx off: latency 0, tail 0");
+        p.setMasterOn(true);
+        check(p.getLatencySamples() == kLatency, "on again: latency " + juce::String(p.getLatencySamples()));
+        for (const double rate : {48000.0, 96000.0}) {
+            p.setRateAndBufferSizeDetails(rate, 512);
+            p.prepareToPlay(rate, 512);
+            const int on = p.getLatencySamples();
+            p.setMasterOn(false);
+            const int off = p.getLatencySamples();
+            p.setMasterOn(true);
+            check(on == expectLag(rate) && off == int(std::ceil(36.0 * rate / 44100.0)) && p.getLatencySamples() == on,
+                  juce::String(rate / 1000.0, 0) + " kHz: latency " + juce::String(on) + " samples with the master (the converter's 35 + 1 frames and the 18 as one delay, "
+                  "rounded up), " + juce::String(off) + " without");
+        }
+    }
+
+    // The regression render with the master on: its hash per note map, the same for any host block size, and the
+    // master-off render's track and send buses sample for sample
+    const auto seq = testSequence();
+    RenderOptions on;
+    on.masterFx = true;
+    int compiledBefore = -1, compiledAfter = -2;
+    on.setup = [&](MdOneProcessor& p) { compiledBefore = p.masterCompiledBlocks(); };
+    on.after = [&](MdOneProcessor& p) { compiledAfter = p.masterCompiledBlocks(); };
+    const auto base = render(seq, kSequenceFrames, on);
+    if (!base.ok) return 1;
+    const auto hash = hashMain(base);
+    check(hash == kMasterRenderHashOs163, "master on, 44.1 kHz, 512-sample blocks: main output hash " + hex(hash) + ", expected " + hex(kMasterRenderHashOs163)
+          + " (peak " + juce::String(shapeOf(base, 44100.0).peakDb, 2) + " dBFS, latency " + juce::String(base.latency) + ")");
+    check(compiledAfter == compiledBefore && (compiledBefore > 0 || !dsp56k::g_jitSupported),
+          "no JIT compile in the master DSP while it played (" + juce::String(compiledBefore) + " blocks before and after)");
+    RenderOptions odd = on;
+    odd.block = 61;
+    odd.setup = {};
+    odd.after = {};
+    const auto oddBlocks = render(seq, kSequenceFrames, odd);
+    check(oddBlocks.ok && oddBlocks.ch[0] == base.ch[0] && oddBlocks.ch[1] == base.ch[1], "master on, 61-sample blocks: the same samples");
+    {
+        RenderOptions white = odd;
+        white.block = 512;
+        white.noteMap = NoteMap::WhiteKeys;
+        const auto w = render(seq, kSequenceFrames, white);
+        check(w.ok && hashMain(w) == kMasterRenderHashWhiteKeysOs163, "master on, white-key map: main output hash " + hex(hashMain(w)) + ", expected "
+              + hex(kMasterRenderHashWhiteKeysOs163));
+    }
+    RenderOptions off;
+    const auto dry = render(seq, kSequenceFrames, off);
+    check(dry.ok && hashMain(dry) == kRenderHashOs163 && hashMain(dry) != hash, "master off: the dry render, " + hex(hashMain(dry)));
+    {
+        // every bus on, track 1 on its own: with the master on, the track and send buses are the master-off render's
+        RenderOptions a = on, b = off;
+        a.setup = b.setup = [](MdOneProcessor& p) { p.setTrackOutput(0, true); p.setTrackOutput(9, true); };
+        a.after = {};
+        a.allBuses = b.allBuses = true;
+        const auto ra = render(seq, kSequenceFrames, a), rb = render(seq, kSequenceFrames, b);
+        bool same = ra.ok && rb.ok;
+        int compared = 0;
+        for (int bus = 1; same && bus < MdOneProcessor::kNumBuses; ++bus)
+            for (int c = 0; c < (bus < MdOneProcessor::kReverbBus ? 1 : 2); ++c, ++compared) same = same && ra.bus(bus, c) == rb.bus(bus, c);
+        check(same && !silentOf(ra.bus(MdOneProcessor::kTrackBus)) && !silentOf(ra.bus(MdOneProcessor::kReverbBus)) && ra.latency == kLatency,
+              "master on: the 16 track buses and both send buses (" + juce::String(compared) + " channels) are the master-off render's, sample for sample, "
+              "once the reported latency is taken off");
+    }
+
+    // An impulse (GND-IM) lands on the same engine frame on every bus: track 1 in the main mix with both sends up, track 2
+    // the same on its own bus, triggered together
+    {
+        const int64_t at = 1000 + 7;
+        const std::vector<Note> notes = {{at, 10, 36, 127}, {at, 10, 37, 127}};
+        RenderOptions o;
+        o.testKit = false;
+        o.allBuses = true;
+        o.masterFx = true;
+        o.setup = [](MdOneProcessor& p) {
+            for (int t = 0; t < 2; ++t) {
+                p.setMachine(t, 3);             // GND-IM
+                p.setTrackParam(t, 19, 127);    // DEL
+                p.setTrackParam(t, 20, 127);    // REV
+            }
+            p.setTrackOutput(1, true);
+        };
+        const auto r = render(notes, 8192, o);
+        RenderOptions dryO = o;
+        dryO.masterFx = false;
+        const auto d = render(notes, 8192, dryO);
+        const int64_t main = onsetOf(r.bus(0)), mainR = onsetOf(r.bus(0, 1)), track = onsetOf(r.bus(MdOneProcessor::kTrackBus + 1)),
+                      rev = onsetOf(r.bus(MdOneProcessor::kReverbBus)), del = onsetOf(r.bus(MdOneProcessor::kDelayBus)), dryMain = onsetOf(d.bus(0));
+        check(r.ok && d.ok && main >= at && main == mainR && main == track && main == rev && main == del && main == dryMain,
+              "an impulse triggered at frame " + juce::String(at) + " lands at frame " + juce::String(main) + " (engine block boundary + the voice) on the main bus L/R ("
+              + juce::String(main) + "/" + juce::String(mainR) + "), track 2's bus (" + juce::String(track) + "), the reverb send (" + juce::String(rev) + ") and the delay send ("
+              + juce::String(del) + ") with the master on, and on the dry main bus with it off (" + juce::String(dryMain) + ")");
+    }
+
+    // 48 and 96 kHz: the 44.1 kHz master render through the converter, with the latency reported
+    for (const double rate : {48000.0, 96000.0}) {
+        RenderOptions o = odd;
+        o.rate = rate;
+        o.block = rate > 50000.0 ? 1024 : 256;
+        const auto r = render(seq, kSequenceFrames, o);
+        if (!r.ok) continue;
+        float worst = 0.f;
+        size_t compared = 0;
+        for (int c = 0; c < 2; ++c) {
+            const auto ref = convertOffline(base.ch[size_t(c)], rate, r.ch[size_t(c)].size());
+            compared = ref.size();
+            for (size_t i = 0; i < ref.size(); ++i) worst = std::max(worst, std::abs(ref[i] - r.ch[size_t(c)][i]));
+        }
+        check(compared > r.ch[0].size() - 200 && worst < 1e-6f, juce::String(rate / 1000.0, 0) + " kHz, master on: the 44.1 kHz render through the converter with the "
+              + juce::String(r.latency) + " samples of latency taken off, max difference " + juce::String(worst, 9) + " over " + juce::String(compared) + " samples");
+    }
+
+    // Master edits: with the master on they change the sound; with it off the main bus stays the dry mix
+    {
+        const auto lev0 = [](MdOneProcessor& p) { p.setMasterFx(7, 0); p.setMasterFx(23, 64); };   // reverb LEV 0, EQ GAIN 64
+        RenderOptions a = odd, b = off;
+        a.setup = b.setup = lev0;
+        const auto ra = render(seq, kSequenceFrames, a), rb = render(seq, kSequenceFrames, b);
+        check(ra.ok && hashMain(ra) != hash && rb.ok && hashMain(rb) == kRenderHashOs163,
+              "reverb LEV 0 and EQ GAIN 64: the master render changes (" + hex(hashMain(ra)) + "), the dry one does not");
+    }
+
+    // Switching while it plays: the latency follows, nothing faults, the master DSP goes on where it stood
+    {
+        MdOneProcessor p;
+        setupTestKit(p);
+        p.setMidiChannel(10);
+        p.setNoteMap(NoteMap::Chromatic);
+        p.setRateAndBufferSizeDetails(44100.0, 256);
+        p.prepareToPlay(44100.0, 256);
+        juce::AudioBuffer<float> buf(p.getTotalNumOutputChannels(), 256);
+        juce::MidiBuffer midi;
+        bool ok = true, sound = false;
+        juce::StringArray lags;
+        for (int b = 0; b < 700; ++b) {
+            if (b % 100 == 50) {
+                p.setMasterOn(!p.masterOn());
+                lags.add(juce::String(p.getLatencySamples()));
+                ok = ok && p.getLatencySamples() == (p.masterOn() ? kLatency : 0);
+            }
+            midi.clear();
+            if (b % 16 == 0) midi.addEvent(juce::MidiMessage::noteOn(10, 36 + (b / 16) % 16, uint8_t(100)), 3);
+            p.processBlock(buf, midi);
+            for (int i = 0; i < 256; ++i) {
+                const float v = buf.getSample(0, i);
+                ok = ok && std::isfinite(v) && std::abs(v) < 4.0f;
+                sound = sound || v != 0.f;
+            }
+        }
+        check(ok && sound && p.engineReady() && !p.statusText().contains("FAULT"),
+              "master_fx switched 7 times while playing: the reported latency follows (" + lags.joinIntoString(" ") + "), no fault: " + p.statusText());
+    }
+
+    // Kit 0 with the master on: the engine's master output at the kit's settings, the other buses lined up with it
+    const auto kitsFile = kitsFileOf(kitsPath);
+    if (kitsFile.isEmpty() || !juce::File(kitsFile).existsAsFile()) {
+        std::printf("[SKIP] kits: no kit snapshot (set MD_KITS_SYX to a Machinedrum .syx with kits, or pass --kits)\n");
+    } else {
+        const auto bank = md::library::loadSyxFile(kitsFile.toStdString());
+        const auto& kit0 = bank.kits.at(0);
+        RenderOptions o;
+        o.testKit = false;
+        o.allBuses = true;
+        o.hostBpm = 0.0;
+        o.tempo = 125.0;
+        o.noteMap = NoteMap::WhiteKeys;
+        o.masterFx = true;
+        o.setup = [&](MdOneProcessor& p) { p.loadKit(kit0, juce::String(bank.name)); };
+        const auto r = render(kitTestSequence(NoteMap::WhiteKeys), int64_t(md::golden::kBlocks) * 32, o);
+        const auto h = hashKitTest(r);
+        const auto direct = directKitTestMaster(os, kit0, MdOneProcessor::kWarmUpBlocks);
+        check(r.ok && h == kKit0MasterProcessorHashOs163, "kit 0 (" + juce::String(kit0.name) + ") through the processor with the master on: hash " + hex(h)
+              + ", expected " + hex(kKit0MasterProcessorHashOs163) + " (peak " + juce::String(20.0 * std::log10(double(peakOf(r.ch[0]))), 1) + " dBFS)");
+        check(h == direct, "the same as the engine's master output with applyKit, the kit's master bytes and primeMaster after the processor's "
+              + juce::String(MdOneProcessor::kWarmUpBlocks) + " warm-up blocks, the sends " + juce::String(kLatency) + " frames behind it (" + hex(direct) + ")");
     }
     settingsDir.deleteRecursively();
     return g_failures ? 1 : 0;
@@ -945,12 +1302,16 @@ int bench(const juce::String& os, double seconds)
         std::printf("engine alone:              %5.1f %% of real time (%.2f s for %.1f s of audio); worst 32-frame block after 1 s %.0f us, %.0f us with the control tick (a block is %.0f us)\n",
                     100.0 * s / (double(blocks) * 32 / 44100.0), s, double(blocks) * 32 / 44100.0, worst[0] * 1e6, worst[1] * 1e6, 32 / 44100.0 * 1e6);
     }
-    for (const double rate : {44100.0, 48000.0, 96000.0}) {
+    // the processor as it ships (master_fx on) at three rates, then at 44.1 kHz with the master off for reference
+    struct Run { double rate; bool master; };
+    for (const Run run : {Run{44100.0, true}, Run{48000.0, true}, Run{96000.0, true}, Run{44100.0, false}}) {
+        const double rate = run.rate;
         MdOneProcessor p;
         if (!p.engineReady()) { std::printf("no engine: %s\n", p.statusText().toRawUTF8()); return 1; }
         setupTestKit(p);
         p.setMidiChannel(10);
         p.setNoteMap(MdOneProcessor::NoteMap::WhiteKeys);
+        p.setMasterOn(run.master);
         constexpr int kBlock = 64;
         p.setRateAndBufferSizeDetails(rate, kBlock);
         p.prepareToPlay(rate, kBlock);
@@ -987,8 +1348,8 @@ int bench(const juce::String& os, double seconds)
         std::sort(times.begin(), times.end());
         const auto at = [&](double q) { return times[std::min(times.size() - 1, size_t(q * double(times.size())))]; };
         const auto over = std::count_if(times.begin(), times.end(), [&](double t) { return t > budget; });
-        std::printf("processor %3.0f kHz, %d-sample blocks: %5.1f %% of real time; callbacks after 1 s (budget %.0f us): 99 %% %.0f us, 99.9 %% %.0f us, max %.0f us, %d of %d over budget; latency %d; allocations after 1 s: %llu, and %llu in the JIT's compiles in %d callbacks\n",
-                    rate / 1000.0, kBlock, 100.0 * sum / (double(callbacks) * budget), budget * 1e6, at(0.99) * 1e6, at(0.999) * 1e6, times.back() * 1e6, int(over), int(times.size()), p.getLatencySamples(),
+        std::printf("processor %3.0f kHz, %d-sample blocks, master %s: %5.1f %% of real time; callbacks after 1 s (budget %.0f us): 99 %% %.0f us, 99.9 %% %.0f us, max %.0f us, %d of %d over budget; latency %d; allocations after 1 s: %llu, and %llu in the JIT's compiles in %d callbacks\n",
+                    rate / 1000.0, kBlock, run.master ? "on " : "off", 100.0 * sum / (double(callbacks) * budget), budget * 1e6, at(0.99) * 1e6, at(0.999) * 1e6, times.back() * 1e6, int(over), int(times.size()), p.getLatencySamples(),
                     (unsigned long long) allocs.outsideJit(), (unsigned long long) allocs.jit, jitCallbacks);
     }
     settingsDir.deleteRecursively();
@@ -1067,6 +1428,13 @@ int checkRt(const juce::String& os)
             if (crossed(3.0)) { p.setTrackParam(2, 12, 30); p.setTrackParam(1, 21, 64); p.setTempo(120.0); head.bpm = 120.0; }
             if (crossed(1.5)) { p.setMachine(0, 32); p.setMachine(5, 17); }
             if (crossed(3.5)) { p.setMachine(0, 16); p.setMachine(5, 49); }
+            // the master effects: edits (the OS's smoothing and parameter code), a kit load (the master primed on the audio
+            // thread), master_fx off and on again (the buses' alignment and the converter's read position switch)
+            if (crossed(0.7)) { p.setMasterFx(8, 64); p.setMasterFx(11, 90); p.setMasterFx(7, 127); p.setMasterFx(26, 20); }
+            if (crossed(2.6)) { p.setMasterFx(8, 16); p.setMasterFx(11, 30); p.setMasterFx(26, 127); }
+            if (crossed(1.2)) p.setMasterOn(false);
+            if (crossed(1.8)) p.setMasterOn(true);
+            if (crossed(2.4)) p.loadDefaultKit();
 
             AllocCounter::begin();
             p.processBlock(buf, midi);
@@ -1593,6 +1961,7 @@ int main(int argc, char** argv)
     if (mode == "--check-os-load") return checkOsLoad(os);
     if (mode == "--check-render") return checkRender(os);
     if (mode == "--check-state") return checkState(os, kits);
+    if (mode == "--check-master") return checkMaster(os, kits);
     if (mode == "--bench") return bench(os, std::max(1.0, benchSeconds));
     if (mode == "--check-rt") return checkRt(os);
     if (mode == "--check-editor") return checkEditor(os, kits);
@@ -1600,6 +1969,7 @@ int main(int argc, char** argv)
     std::fprintf(stderr, "usage: md-plugin-check --check-os-load [--fw os.syx]\n"
                          "       md-plugin-check --check-render [--fw os.syx]\n"
                          "       md-plugin-check --check-state [--fw os.syx] [--kits kits.syx]\n"
+                         "       md-plugin-check --check-master [--fw os.syx] [--kits kits.syx]\n"
                          "       md-plugin-check --check-editor [--fw os.syx] [--kits kits.syx]\n"
                          "       md-plugin-check --bench [seconds] [--fw os.syx]\n"
                          "       md-plugin-check --check-rt [--fw os.syx]\n"

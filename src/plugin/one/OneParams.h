@@ -14,9 +14,15 @@
 //                                       0-23, shapes 0-5, update 0-2 (FREE, TRIG, HOLD)
 // Globals, group "Global": tempo (BPM when the host gives none), midi_channel (0 = omni), accent (the accent amount;
 // notes at velocity 127 play accented while it is above 0), note_map (which MIDI notes trigger the tracks).
+// The master effects (.clew increment 0009), group "Master FX": master_fx (on/off: the master section's output is the
+// main bus, or the dry mix as before), then the kit's 32 master bytes in the kit dump's order, 0-127, in four
+// sub-groups: REV (gate box reverb) fx_rev_dvol .. fx_rev_lev, ECHO (rhythm echo) fx_echo_time .. fx_echo_lev, EQ (master
+// EQ) fx_eq_lf .. fx_eq_gain, DYN (dynamix) fx_dyn_atck .. fx_dyn_mix. The editor's pages run ECHO, REV, EQ, DYN, as the
+// hardware's menu does; the parameters keep the storage order (md::library::MasterFx::bytes()).
 //
-// The ids are the keys of sd88me/mpc-vst-machinedrum's vst/params.json (its gen_params.py), so kit and preset tooling
-// can be shared; that port's VST index order is not kept (its file is grouped by when each key was added).
+// The track and global ids are the keys of sd88me/mpc-vst-machinedrum's vst/params.json (its gen_params.py), so kit and
+// preset tooling can be shared; that port's VST index order is not kept (its file is grouped by when each key was added).
+// It has no master effects: their ids are ours.
 #pragma once
 #include <juce_core/juce_core.h>
 #include <array>
@@ -39,7 +45,10 @@ enum Slot : int {
 };
 constexpr int kTrackParams = kSlots;
 constexpr int kGlobals = 4;
-constexpr int kTotal = kTracks * kTrackParams + kGlobals;
+constexpr int kMasterBlocks = 4, kMasterBlockParams = 8;
+constexpr int kMasterParams = kMasterBlocks * kMasterBlockParams;   // = md::engine::master::kParams
+constexpr int kMasterGroupParams = 1 + kMasterParams;               // master_fx, then the 32 bytes
+constexpr int kTotal = kTracks * kTrackParams + kGlobals + kMasterGroupParams;
 
 constexpr int kMaxMachine = 191;
 constexpr std::array<const char*, kKitParams> kKitKeys = {
@@ -81,6 +90,29 @@ constexpr const char* kTempoId = "tempo";
 constexpr const char* kMidiChannelId = "midi_channel";
 constexpr const char* kAccentId = "accent";
 constexpr const char* kNoteMapId = "note_map";
+
+// The master effects: block b (0 reverb, 1 echo, 2 EQ, 3 dynamix: the kit dump's order), parameter i = 8b + k
+constexpr const char* kMasterFxId = "master_fx";
+constexpr const char* kMasterGroupId = "MasterFX";
+enum MasterBlock : int { kRev = 0, kEcho = 1, kEq = 2, kDyn = 3 };
+constexpr std::array<const char*, kMasterBlocks> kMasterBlockKeys = {"rev", "echo", "eq", "dyn"};
+constexpr std::array<const char*, kMasterBlocks> kMasterBlockNames = {"REV", "ECHO", "EQ", "DYN"};   // the hardware's menu tabs
+// The hardware's labels (MD manual p. 29-31; md::library::MasterFx)
+constexpr std::array<const char*, kMasterParams> kMasterNames = {
+    "DVOL", "PRED", "DEC", "DAMP", "HP", "LP", "GATE", "LEV",       // gate box reverb
+    "TIME", "MOD", "MFRQ", "FB", "FILTF", "FILTW", "MONO", "LEV",   // rhythm echo
+    "LF", "LG", "HF", "HG", "PF", "PG", "PQ", "GAIN",               // master EQ
+    "ATCK", "REL", "TRHD", "RTIO", "KNEE", "HP", "OUTG", "MIX"};    // dynamix
+// The editor's (and the hardware's) page order: ECHO, REV, EQ, DYN
+constexpr std::array<int, kMasterBlocks> kMasterPageBlocks = {kEcho, kRev, kEq, kDyn};
+
+inline juce::String masterId(int i)   // fx_rev_dvol .. fx_dyn_mix
+{
+    return juce::String("fx_") + kMasterBlockKeys[size_t(i / kMasterBlockParams)] + "_" + juce::String(kMasterNames[size_t(i)]).toLowerCase();
+}
+inline juce::String masterName(int i) { return juce::String(kMasterBlockNames[size_t(i / kMasterBlockParams)]) + " " + kMasterNames[size_t(i)]; }
+// The four sub-groups of "Master FX"
+inline juce::String masterBlockGroupId(int block) { return juce::String("MasterFX") + kMasterBlockNames[size_t(block)]; }
 
 // MIDI note -> track. WhiteKeys is the hardware's default map (MD manual, appendix B: tracks 1-16 on the white keys from
 // C2); Chromatic is the MPC port's convention, notes 36-51 and also 0-15 (its drum-pad layout).

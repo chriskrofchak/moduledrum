@@ -65,6 +65,11 @@ if(MD_BUILD_TESTS)
   # Parameters, machine changes, kits and the state round trip (needs the OS file; the kit snapshot, MD_KITS_SYX, adds the kit cases)
   add_test(NAME plugin-state COMMAND MdPluginCheck --check-state)
   set_tests_properties(plugin-state PROPERTIES SKIP_RETURN_CODE 77)
+  # The master effects in the plugin: master_fx, latency and tail, the master-on regression hashes (both note maps), every
+  # bus lined up with the master output, 48/96 kHz, switching while playing (needs the OS file; the kit snapshot,
+  # MD_KITS_SYX, adds kit 0 against the engine's master output)
+  add_test(NAME plugin-master COMMAND MdPluginCheck --check-master)
+  set_tests_properties(plugin-master PROPERTIES SKIP_RETURN_CODE 77)
   # The editor, headless: knobs on their parameters (drag, shift, wheel, typed values, host changes), track select, the
   # machine picker, the LFO page's names, the mixer and globals, the kit folder and browser (needs the OS file; the kit
   # snapshot, MD_KITS_SYX, adds the browser's kit cases), every page rendered
