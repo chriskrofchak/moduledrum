@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #if defined(__APPLE__)
+#include <mach/mach.h>
 #include <pthread.h>
 #endif
 #include "Dsp1Reference.h"
@@ -372,6 +373,63 @@ TEST_CASE(mfx_block_cost_and_no_compile)
         if (kCanCountAllocs) CHECK_EQ(allocs, uint64_t(0));
     } else {
         CHECK_MSG(median < 400.0, "median block " << median << " us");
+    }
+}
+
+#if defined(__APPLE__)
+namespace {
+double physFootprintMb()
+{
+    task_vm_info_data_t info;
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &n);
+    return double(info.phys_footprint) / 1048576.0;
+}
+}
+
+// RAM: an emulated DSP costs what its program touches. With dsp56300's mlock() of every alias of the DSP's memory (192 MB) and its
+// audio ring buffers (80 MB) a booted master DSP took 362 MB and a voice DSP 358; without them 91 and 87 (JIT; the interpreter's
+// opcode cache adds 100). ext/patches/0002-dsp56300-md-memory.patch and DSP56300_AUDIO_RINGBUFFER_SIZE (src/core/CMakeLists.txt).
+TEST_CASE(ram_master_and_voice_dsp)
+{
+    os();	// load the OS file first: its parsed form is not part of what is measured
+    const double before = physFootprintMb();
+    auto m = std::make_unique<MasterFx>(os().firmware);
+    const double masterMb = physFootprintMb() - before;
+    auto v = std::make_unique<VoiceEngine>(os().firmware);
+    const double voiceMb = physFootprintMb() - before - masterMb;
+    std::printf("ram_master_and_voice_dsp: a booted master DSP %.0f MB, a booted voice DSP %.0f MB (phys_footprint)\n", masterMb, voiceMb);
+    const double limit = dsp56k::g_useJIT ? 200.0 : 320.0;
+    CHECK_MSG(masterMb < limit, "the master DSP takes " << masterMb << " MB: is ext/patches/0002-dsp56300-md-memory.patch applied?");
+    CHECK_MSG(voiceMb < limit, "the voice DSP takes " << voiceMb << " MB: is ext/patches/0002-dsp56300-md-memory.patch applied?");
+}
+#endif
+
+// The dry path through the master pass is master::kDryLatency frames later than the mix going in (the dynamix's look-ahead
+// ring), whatever the settings; a left impulse stays on the left. The plugin lines the other streams up with it.
+TEST_CASE(mfx_dry_latency)
+{
+    auto chain = chainEngine();
+    for (const auto& bytes : {master::kDefaultParams, golden::kMasterDry, golden::kMasterWet}) {
+        uint32_t words[master::kWords];
+        chain->host().computeMasterWords(bytes.data(), 125.0, words);
+        MasterFx m(os().firmware);
+        m.setWords(words);
+        Mixer::Output in;
+        Mixer::Stereo out;
+        in.main[0][0] = 0x400000;
+        int first = -1;
+        bool rightQuiet = true;
+        for (int b = 0; b < 4 && first < 0; ++b) {
+            CHECK(m.process(in, out));
+            in.main[0][0] = 0;
+            for (int f = 0; f < 32; ++f) {
+                if (first < 0 && out[size_t(f)][0] != 0) first = b * 32 + f;
+                rightQuiet = rightQuiet && out[size_t(f)][1] == 0;
+            }
+        }
+        CHECK_EQ(first, master::kDryLatency);
+        CHECK(rightQuiet);
     }
 }
 

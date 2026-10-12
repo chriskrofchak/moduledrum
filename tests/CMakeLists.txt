@@ -34,7 +34,9 @@ add_test(NAME jit COMMAND md-tests jit_)
 add_test(NAME master COMMAND md-tests mfx_)
 add_test(NAME master-host COMMAND md-tests mhost_)
 add_test(NAME golden-master COMMAND md-tests gmaster_)
-set_tests_properties(firmware golden-hash kits jit master master-host golden-master PROPERTIES SKIP_RETURN_CODE 77)
+# master-ram: the footprint of a booted DSP (macOS), in a process of its own so that earlier tests' freed memory does not hide it
+add_test(NAME master-ram COMMAND md-tests ram_)
+set_tests_properties(firmware golden-hash kits jit master master-host golden-master master-ram PROPERTIES SKIP_RETURN_CODE 77)
 
 # The host-rate converter (src/core/dsp; needs no OS file)
 add_executable(md-dsp-tests mini_test.cpp test_resampler.cpp)

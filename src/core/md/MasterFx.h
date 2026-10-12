@@ -30,6 +30,11 @@ namespace md::engine
 		constexpr int kWords = 38;		// the DSP words the OS computes from them
 		constexpr int kGroups = 4;
 
+		// The dry mix comes out of the master pass this many frames (of 44.1 kHz) late, whatever the settings (the dynamix reads
+		// the block back from its 96-frame look-ahead ring): later than the track buses and the send buses, which do not pass
+		// through it. A plugin that plays them side by side delays those by as much.
+		constexpr int kDryLatency = 18;
+
 		// The OS sends the words in four groups, one per control tick (tick counter & 3), each into a stretch of DSP1's Y
 		// memory. Index = the OS's group number; offset = where the group's words sit in the 38-word array, which runs in
 		// ascending Y address: echo Y:$150-$158, EQ $170-$179, dynamix $17a-$184, reverb $185-$18c.
