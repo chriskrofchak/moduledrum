@@ -9,7 +9,9 @@
 //   MD_RELEASE=n  silence release after n quiet blocks (HostModel::setSilenceRelease)
 //   MD_RAW=file   main L/R as int32, for comparing two runs
 //   MD_T1=1       voice budget 1 walkthrough (prints the active voice count)
+//   MD_TIMING=1   also prints the render's wall-clock time and its stages (voice DSP, OS tick, track fx, mix)
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -61,14 +63,21 @@ static void run(E& eng, const char* romSamples)
 	if(getenv("MD_BUDGET")) h.setMaxActiveVoices(atoi(getenv("MD_BUDGET")));
 	if(getenv("MD_RELEASE")) h.setSilenceRelease(128, atoi(getenv("MD_RELEASE")));	// silence release, hold in blocks
 	FILE* raw = getenv("MD_RAW") ? fopen(getenv("MD_RAW"), "wb") : nullptr;
+	const bool timing = getenv("MD_TIMING") != nullptr;
+	if(timing) { h.timingOn = true; eng.timingOn = true; }
+	const auto t0 = std::chrono::steady_clock::now();
 	const uint64_t hash = md::golden::render(eng, [&](int b, const typename E::Output& out)
 	{
 		if(b > 2000) { const int a = eng.voices().activeVoicesLastBlock(); maxActive = a > maxActive ? a : maxActive; sumActive += a; ++nb; }
 		if(raw) fwrite(out.mix.main.data(), sizeof(int32_t), 64, raw);
 	});
+	const double renderMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	if(raw) fclose(raw);
 	if(!eng.fault().empty()) fprintf(stderr, "md-hash: DSP fault: %s\n", eng.fault().c_str());
 	printf("hash %016llx\n", (unsigned long long)hash);
+	if(timing)	// the 12 s pattern (engine already booted): the whole render and its stages, wall clock
+		printf("timing: render %.0f ms (%.1f %% of real time); voice DSP %.0f ms, OS tick %.0f ms, track fx %.0f ms, mix %.0f ms\n",
+			renderMs, renderMs / (1000.0 * md::golden::kBlocks * 32 / 44100.0) * 100.0, h.dspUs / 1000.0, h.tickUs / 1000.0, eng.fxUs / 1000.0, eng.mixUs / 1000.0);
 	if(getenv("MD_BUDGET") || getenv("MD_RELEASE")) printf("budget %s release %s: max rendered voices %d, mean %.2f, released %u\n", getenv("MD_BUDGET") ? getenv("MD_BUDGET") : "-", getenv("MD_RELEASE") ? getenv("MD_RELEASE") : "-", maxActive, double(sumActive) / (nb ? nb : 1), h.silenceReleases());
 }
 

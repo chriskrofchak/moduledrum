@@ -14,3 +14,9 @@ target_compile_definitions(md-machines PRIVATE MD_OS_SYX="${MD_OS_SYX}")
 add_executable(md-kits md_kits.cpp)
 target_link_libraries(md-kits PRIVATE mdcore)
 target_compile_definitions(md-kits PRIVATE MD_OS_SYX="${MD_OS_SYX}")
+
+# md-voicediag: disassembles the voice DSP's P memory as VoiceEngine sets it up (harness included) or steps it from its
+# entry, one line per exec(); for chasing a build that does not boot (.clew increment 0011)
+add_executable(md-voicediag md_voicediag.cpp)
+target_link_libraries(md-voicediag PRIVATE mdcore)
+target_compile_definitions(md-voicediag PRIVATE MD_OS_SYX="${MD_OS_SYX}")

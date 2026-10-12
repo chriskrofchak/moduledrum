@@ -15,9 +15,11 @@ endif()
 
 option(MD_BUILD_PLUGIN "Build the plugins (needs JUCE, downloaded at configure time)" ON)
 option(MD_BUILD_TESTS  "Build the unit tests" ON)
-# The emulated DSP runs on dsp56300's interpreter: the aarch64 JIT does not boot the voice harness yet (.clew
-# increment 0011). ON drops DSP56K_NO_JIT_RUNTIME, so the emulator uses its JIT where it has one.
-option(MD_USE_JIT "Run the emulated DSP on dsp56300's JIT instead of its interpreter (experimental)" OFF)
+# The emulated DSP runs on dsp56300's JIT where it has one (aarch64, x86-64): bit for bit what the interpreter renders
+# (md-hash, the machine sweep, the 64 preset kits, the plugin's regression render; .clew increment 0011) at about a
+# quarter of its CPU. OFF defines DSP56K_NO_JIT_RUNTIME everywhere: the interpreter, the reference the JIT is checked
+# against (MD_JIT_LOCKSTEP=1 runs both side by side).
+option(MD_USE_JIT "Run the emulated DSP on dsp56300's JIT (OFF: its interpreter; the same audio at ~4x the CPU)" ON)
 
 # Optional: your Machinedrum OS file. Used as the default by the command-line tools and by the tests that run the
 # engine (they are skipped without it; the MD_OS_SYX environment variable overrides it). The plugins never use it:

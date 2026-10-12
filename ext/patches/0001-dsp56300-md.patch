@@ -1,0 +1,177 @@
+Moduledrum's patch for dsp56300 (sd88me's fork at 26558e5401fa134a013eca8dbb8c5ecde837ec55, ext/dsp56300): JIT fixes
+that make the JIT bit-exact with the interpreter on the Machinedrum voice DSP program (.clew increment 0011, found by
+running both in lockstep). cmake/dsp56300.cmake applies it to the checkout at configure time; every change is marked
+"MD patch" in the source. Only JIT code changes: the interpreter builds the same code as before.
+
+1. jitblock.cpp, JitBlock::getInfo: a REP and the instruction it repeats could end up in two blocks (the repeated
+   instruction ended the block, e.g. because it reads an M register written earlier in the block). JitOps::rep_exec emits
+   the repeated instruction with the REP anyway, so the block ran all repetitions and left PC on the repeated
+   instruction, which the next block then ran once more. Now the pair always stays in one block, or the block ends
+   before the REP.
+2. jitdspregpoolregpair.cpp, JitRegPoolRegPair::get: a 48-bit read of x or y merged written halves (x0/x1/y0/y1) into
+   the combined register and cleared the halves' written flags. The combined register is a read cache that is never
+   stored, so the write was lost: "move x:(r1),y1 / sub y,a / nop" in a block left the old y1 in the DSP registers.
+   (Changes the audio of 5 of the 64 kits in Elektron's preset file.)
+3. jitops_alu_aarch64.cpp, jitops_alu_x64.cpp, JitOps::alu_asl: on aarch64, ASL by zero (#0, or a shift register that
+   holds 0) set C for every negative value (C was bit 56 of the sign-extended value); and on both back ends a multi-bit
+   ASL never set L when it set V. The interpreter clears C for a zero shift and sets L along with V.
+
+diff --git a/source/dsp56kEmu/jitblock.cpp b/source/dsp56kEmu/jitblock.cpp
+index a16f69e0..9deb79c0 100644
+--- a/source/dsp56kEmu/jitblock.cpp
++++ b/source/dsp56kEmu/jitblock.cpp
+@@ -65,18 +65,27 @@ namespace dsp56k
+ 		auto writesM = RegisterMask::None;
+ 		auto readsM = RegisterMask::None;
+ 
++		// MD patch: JitOps::rep_exec emits a REP together with the instruction it repeats, so the two must not be split
++		// across blocks: a block that ended after the REP still ran the repeated instruction, but left the PC on it, and
++		// the next block ran it once more. The repeated instruction always joins the REP's block; a REP whose repeated
++		// instruction could not join the block (it reads an M register written earlier in the block, or its address is
++		// taken by existing code or is volatile) ends the block before the REP instead.
++		bool nextIsRepeated = false;
++
+ 		while(shouldEmit)
+ 		{
+ 			const auto pc = _pc + numWords;
++			const bool isRepeated = nextIsRepeated;	// MD patch
++			nextIsRepeated = false;
+ 
+-			if(pc >= pcMax)
++			if(pc >= pcMax && !isRepeated)
+ 			{
+ 				terminationReason = JitBlockInfo::TerminationReason::PcMax;
+ 				break;
+ 			}
+ 
+ 			// never overwrite code that already exists
+-			if(pc < _cache.size() && _cache[pc].block)
++			if(pc < _cache.size() && _cache[pc].block && !isRepeated)
+ 			{
+ 				terminationReason = JitBlockInfo::TerminationReason::ExistingCode;
+ 				break;
+@@ -125,7 +134,7 @@ namespace dsp56k
+ 			// while an M register change causes a mode change, we can continue this block as long as that M register is not read in a subsequent instruction
+ 			if((writesM & readsM) != RegisterMask::None)
+ 			{
+-				if(numInstructions)
++				if(numInstructions && !isRepeated)
+ 				{
+ 					_info.terminationReason = JitBlockInfo::TerminationReason::ModeChange;
+ 					break;
+@@ -133,8 +142,8 @@ namespace dsp56k
+ 			}
+ 
+ 			// for a volatile P address, if you have some code, break now. if not, generate this one op, and then return.
+-			if (_volatileP.find(pc) != _volatileP.end() || 
+-				(_volatileP.find(pc+1) != _volatileP.end() && Opcodes::getOpcodeLength(opA, instA, instB) == 2))
++			if (!isRepeated && (_volatileP.find(pc) != _volatileP.end() ||
++				(_volatileP.find(pc+1) != _volatileP.end() && Opcodes::getOpcodeLength(opA, instA, instB) == 2)))
+ 			{
+ 				terminationReason = JitBlockInfo::TerminationReason::VolatileP;
+ 				if (numInstructions)
+@@ -144,6 +153,34 @@ namespace dsp56k
+ 
+ 			const auto isRep = flags & (OpFlagRepDynamic | OpFlagRepImmediate);
+ 
++			// MD patch: would the repeated instruction be refused by the checks above? Then end the block before the REP.
++			if(isRep && numInstructions && shouldEmit)
++			{
++				const TWord pcRep = pc + Opcodes::getOpcodeLength(opA, instA, instB);
++				TWord repA, repB;
++				_dsp.memory().getOpcode(pcRep, repA, repB);
++				Instruction repInstA, repInstB;
++				opcodes.getInstructionTypes(repA, repInstA, repInstB);
++				auto repWritten = RegisterMask::None;
++				auto repRead = RegisterMask::None;
++				Opcodes::getRegisters(repWritten, repRead, repA, repInstA, repInstB);
++
++				if(pcRep >= pcMax)
++					terminationReason = JitBlockInfo::TerminationReason::PcMax;
++				else if(pcRep < _cache.size() && _cache[pcRep].block)
++					terminationReason = JitBlockInfo::TerminationReason::ExistingCode;
++				else if((repRead & writesM) != RegisterMask::None)
++					terminationReason = JitBlockInfo::TerminationReason::ModeChange;
++				else if(_volatileP.find(pcRep) != _volatileP.end())
++					terminationReason = JitBlockInfo::TerminationReason::VolatileP;
++				else
++					terminationReason = JitBlockInfo::TerminationReason::None;
++
++				if(terminationReason != JitBlockInfo::TerminationReason::None)
++					break;
++			}
++			nextIsRepeated = isRep;
++
+ 			writtenRegs |= written;
+ 			readRegs |= read;
+ 
+diff --git a/source/dsp56kEmu/jitdspregpoolregpair.cpp b/source/dsp56kEmu/jitdspregpoolregpair.cpp
+index 466d4ad4..c766d5b2 100644
+--- a/source/dsp56kEmu/jitdspregpoolregpair.cpp
++++ b/source/dsp56kEmu/jitdspregpoolregpair.cpp
+@@ -35,9 +35,9 @@ namespace dsp56k
+ 				// use dst as temp
+ 				replaceHigh(_dst, r64(regBase), r32(reg1));
+ 			}
+-			m_pool.clearWritten(m_reg0);
+-			m_pool.clearWritten(m_reg1);
+-
++			// MD patch: the partials stay flagged as written. The combined register is a read cache that is never stored
++			// (JitDspRegPool::store asserts on DspX/DspY), so clearing their flags here dropped their write-back: the
++			// value of a partial written before a 48-bit read of x/y in the same block never reached the DSP registers.
+ 			asm_().mov(r64(_dst), r64(regBase));
+ 		}
+ 		// If the common reg is already loaded, use it
+diff --git a/source/dsp56kEmu/jitops_alu_aarch64.cpp b/source/dsp56kEmu/jitops_alu_aarch64.cpp
+index 4d2e9864..768ec380 100644
+--- a/source/dsp56kEmu/jitops_alu_aarch64.cpp
++++ b/source/dsp56kEmu/jitops_alu_aarch64.cpp
+@@ -66,6 +66,18 @@ namespace dsp56k
+ 		if (_abDst != _abSrc)
+ 			m_dspRegs.getALU(alu.get(), _abSrc);
+ 
++		// MD patch: carry is the last bit shifted out, and cleared for a shift amount of zero (as in the interpreter and the
++		// x64 JIT). Bit 56 of the zero-extended 56-bit value shifted left is that bit and stays clear for a zero shift; bit 56
++		// of the sign-extended copy below is the sign, so taking C from it set C for any negative value shifted by zero.
++		{
++			const RegGP c(m_block);
++			if(_v)
++				m_asm.lsl(c, alu, _v->get());
++			else
++				m_asm.lsl(c, alu, asmjit::Imm(_immediate));
++			copyBitToCCR(c, 56, CCRB_C);
++		}
++
+ 		signextend56to64(alu);
+ 
+ 		const RegGP oldAlu(m_block);
+@@ -76,9 +88,6 @@ namespace dsp56k
+ 		else
+ 			m_asm.lsl(alu, alu, asmjit::Imm(_immediate));
+ 
+-		// carry is the last bit shifted out so in our case its 56
+-		copyBitToCCR(alu, 56, CCRB_C);
+-
+ 		// Overflow: Set if Bit 55 is changed any time during the shift operation, cleared otherwise.
+ 		// The easiest way to check this is to shift back and compare if the initial alu value is identical ot the backshifted one
+ 		{
+@@ -92,6 +101,7 @@ namespace dsp56k
+ 		}
+ 
+ 		ccr_update_ifNotZero(CCRB_V);
++		ccr_l_update_by_v();	// MD patch: L is set when V is (sticky), as in the interpreter's alu_asl
+ 
+ 		m_dspRegs.mask56(alu);
+ 
+diff --git a/source/dsp56kEmu/jitops_alu_x64.cpp b/source/dsp56kEmu/jitops_alu_x64.cpp
+index 74c72082..49118c6f 100644
+--- a/source/dsp56kEmu/jitops_alu_x64.cpp
++++ b/source/dsp56kEmu/jitops_alu_x64.cpp
+@@ -92,6 +92,7 @@ namespace dsp56k
+ 		}
+ 
+ 		ccr_update_ifNotZero(CCRB_V);
++		ccr_l_update_by_v();	// MD patch: L is set when V is (sticky), as in the interpreter's alu_asl
+ 		
+ 		m_asm.shr(alu, asmjit::Imm(8));				// correction for our pre-shift by 8
+ 

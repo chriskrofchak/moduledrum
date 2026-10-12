@@ -4,6 +4,7 @@ add_executable(md-tests
   mini_test.cpp
   test_firmware.cpp
   test_golden.cpp
+  test_jit.cpp
   test_kits.cpp
 )
 target_link_libraries(md-tests PRIVATE mdcore)
@@ -22,7 +23,9 @@ add_test(NAME firmware COMMAND md-tests firmware_)
 add_test(NAME golden-hash COMMAND md-tests golden_)
 # kits: the sysex layout on a synthetic kit always runs; the 64-kit snapshot (MD_KITS_SYX) and the OS (MD_OS_SYX) add the rest
 add_test(NAME kits COMMAND md-tests kits_)
-set_tests_properties(firmware golden-hash kits PROPERTIES SKIP_RETURN_CODE 77)
+# jit: the dsp56300 JIT against its interpreter on small programs, one per fix in ext/patches (skipped with MD_USE_JIT=OFF)
+add_test(NAME jit COMMAND md-tests jit_)
+set_tests_properties(firmware golden-hash kits jit PROPERTIES SKIP_RETURN_CODE 77)
 
 # The host-rate converter (src/core/dsp; needs no OS file)
 add_executable(md-dsp-tests mini_test.cpp test_resampler.cpp)

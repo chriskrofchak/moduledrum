@@ -47,26 +47,28 @@ namespace md::engine
 		constexpr uint64_t kMaxInstrBlock = 20'000'000;
 	}
 
-	VoiceEngine::VoiceEngine(const fw::Firmware& _fw) : m_fw(_fw)
+	VoiceEngine::VoiceEngine(const fw::Firmware& _fw, const bool _boot) : VoiceEngine(_fw, _boot, false)
+	{
+	}
+
+	// _shadow: the lockstep shadow (MD_JIT_LOCKSTEP), the same DSP run by the interpreter; its owner steps and boots it.
+	VoiceEngine::VoiceEngine(const fw::Firmware& _fw, const bool _boot, const bool _shadow) : m_fw(_fw), m_isShadow(_shadow)
 	{
 		m_validator = std::make_unique<DefaultMemoryValidator>();
 		m_mem = std::make_unique<Memory>(*m_validator, kSizeP, kSizeXY, kBridge);
 		m_periphX = std::make_unique<Peripherals56303>();
 		m_periphY = std::make_unique<PeripheralsNop>();
 		m_dsp = std::make_unique<DSP>(*m_mem, m_periphX.get(), m_periphY.get());
-		if constexpr(g_useJIT)
+		if(g_useJIT && !m_isShadow)
 		{
-			// As gearmulator-md-mm configures its DSPs: the program keeps code in the vector area.
-			auto cfg = m_dsp->getJit().getConfig();
-			cfg.dynamicFastInterrupts = true;
-			cfg.aguSupportBitreverse = true;
-			cfg.linkJitBlocks = false;
-			m_dsp->getJit().setConfig(cfg);
+			configureJit();
+			if(std::getenv("MD_JIT_LOCKSTEP"))
+				m_shadow.reset(new VoiceEngine(_fw, false, true));
 		}
 		else
 		{
-			// No JIT on this target (32-bit ARM, the Force): exec() falls back to the interpreter, whose
-			// per-address opcode cache this fork only builds on request (it costs ~48 bytes x P size, moot
+			// The interpreter (no JIT on this target or MD_USE_JIT=OFF, or the lockstep shadow): exec() falls back to
+			// it, and its per-address opcode cache this fork only builds on request (it costs ~48 bytes x P size, moot
 			// when the JIT is the normal path). Without this, the cache is empty and exec() dereferences a
 			// null instruction-handler pointer on the very first instruction.
 			m_dsp->setInterpreterEnabled(true);
@@ -87,10 +89,43 @@ namespace md::engine
 			});
 			essi->setWriteTxCallback([](uint64_t& _frameIndex, const Audio::TxFrame&) { ++_frameIndex; });
 		}
-		reset();
+		reset(_boot);
 	}
 
 	VoiceEngine::~VoiceEngine() = default;
+
+	void VoiceEngine::configureJit()
+	{
+		auto cfg = m_dsp->getJit().getConfig();
+
+		// The voice program keeps ordinary code in the interrupt vector area (init at P:$24, the whole block loop at
+		// $64-$e5). Without interruptRegionIsCode the JIT compiles everything below $100 as 2-word fast-interrupt
+		// blocks; there, JitOps::pushPCSR pushes the PC register instead of the return address, and an unconditional
+		// branch's block never sets PC before its op runs: init's 'jsr >$100024' at $3b pushed $3b, its rts came back
+		// to the jsr, and the init ran forever ("instruction budget exceeded at PC=$10008b"). With it, a block there is
+		// a fast-interrupt block only while the DSP is in a fast interrupt (Monomodule's setting, for the Monomachine
+		// kernel's code below $100).
+		cfg.interruptRegionIsCode = true;
+		cfg.dynamicFastInterrupts = true;	// as gearmulator-md-mm configures its DSPs
+		cfg.aguSupportBitreverse = true;	// as gearmulator-md-mm configures its DSPs
+
+		// Blocks return to exec() rather than jumping into each other: runUntilTx() sees each host word right after the
+		// block that sent it. Linking did not measure faster here (md-hash 0.54 s either way).
+		cfg.linkJitBlocks = false;
+
+		// The two flag stubs are one-instruction blocks, so that exec() returns right after the flag's movep, as the
+		// interpreter does: readBlock() then reads the instruction counter at the same point and the per-voice costs
+		// (HostModel's voice-group balancing) are the interpreter's to the instruction. One more exec() call per voice.
+		auto single = cfg;
+		single.maxInstructionsPerBlock = 1;
+		cfg.getBlockConfig = [single](const TWord _pc) -> std::optional<JitConfig>
+		{
+			if(_pc == kSkipNormal || _pc == kSkipSilent)
+				return single;
+			return std::nullopt;
+		};
+		m_dsp->getJit().setConfig(cfg);
+	}
 
 	void VoiceEngine::loadImage(const fw::DspImage& _img)
 	{
@@ -198,8 +233,11 @@ namespace md::engine
 
 	void VoiceEngine::writeP(const uint32_t _addr, const uint32_t* _words, const size_t _count)
 	{
+		// memWriteP, not a plain memory write: it is what tells the JIT (and the interpreter's opcode cache) about P changes
 		for(size_t i = 0; i < _count && _addr + i < m_mem->sizeP(); ++i)
-			m_mem->set(MemArea_P, static_cast<TWord>(_addr + i), _words[i] & 0xffffff);
+			m_dsp->memWriteP(static_cast<TWord>(_addr + i), _words[i] & 0xffffff);
+		if(m_shadow)
+			m_shadow->writeP(_addr, _words, _count);
 	}
 
 	uint32_t VoiceEngine::readP(const uint32_t _addr) const
@@ -207,7 +245,7 @@ namespace md::engine
 		return _addr < m_mem->sizeP() ? m_mem->get(MemArea_P, _addr) & 0xffffff : 0;
 	}
 
-	void VoiceEngine::reset()
+	void VoiceEngine::reset(const bool _boot)
 	{
 		m_fault.clear();
 		m_dsp->resetHW();
@@ -221,13 +259,17 @@ namespace md::engine
 		while(hi.hasTX())
 			hi.readTX();
 		m_dsp->setPC(kEntry);
+		if(m_shadow)
+			m_shadow->reset(false);
+		if(!_boot)
+			return;
 
 		// Init runs into the block loop; the first (silent) block comes out and the DSP then waits for "go".
 		Block first;
 		if(!readBlock(first, kMaxInstrInit))
 			throw std::runtime_error("voice DSP init did not complete: " + m_fault);
 		while(hi.hasTX())
-			hi.readTX();
+			readTx();
 	}
 
 	void VoiceEngine::setSlot(const int _voice, const uint32_t* _words, const int _count)
@@ -235,6 +277,8 @@ namespace md::engine
 		const TWord base = kSlotBase + kSlotStride * static_cast<TWord>(_voice);
 		for(int k = 0; k < _count; ++k)
 			m_dsp->memWrite(MemArea_Y, base + static_cast<TWord>(k), _words[k] & 0xffffff);
+		if(m_shadow)
+			m_shadow->setSlot(_voice, _words, _count);
 	}
 
 	bool VoiceEngine::runUntilTx(const size_t _words, const uint64_t _maxInstructions)
@@ -245,7 +289,19 @@ namespace md::engine
 		uint64_t nextReport = start + 5'000'000;
 		while(hi.txData().size() < _words)
 		{
+			const TWord pc = m_dsp->getPC().toWord();
 			m_dsp->exec();
+			if constexpr(g_useJIT)
+			{
+				// A block the JIT could not generate (no JIT memory) is a sticky failure: the DSP makes no progress.
+				if(m_dsp->getJit().hasFailed())
+				{
+					m_fault = "DSP JIT failed: " + m_dsp->getJit().failReason();
+					return false;
+				}
+				if(m_shadow)
+					lockstep(pc);
+			}
 			if(debug && m_dsp->getInstructionCounter() > nextReport)
 			{
 				std::fprintf(stderr, "  PC=$%06x instr=%llu tx=%zu\n", m_dsp->getPC().toWord(),
@@ -268,7 +324,6 @@ namespace md::engine
 	// Every voice's slot is read before its flag goes out, so once the 16th flag is in the DSP has consumed every slot.
 	bool VoiceEngine::readBlock(Block& _out, const uint64_t _maxInstructions)
 	{
-		auto& hi = m_periphX->getHI08();
 		m_lastActive = 0;
 		uint64_t prev = m_dsp->getInstructionCounter();
 		int idx = 0;
@@ -283,7 +338,7 @@ namespace md::engine
 				if(idx > 0) m_voiceInstr[static_cast<size_t>(idx - 1)] = static_cast<uint32_t>(now - prev);
 				prev = now;
 			}
-			const TWord flag = hi.readTX() & 0xffffff;
+			const TWord flag = readTx() & 0xffffff;
 			if(flag == 1) ++m_lastActive;
 			if(flag != 1)
 			{
@@ -295,7 +350,7 @@ namespace md::engine
 				return false;
 			for(auto& s : voice)
 			{
-				const TWord t = hi.readTX() & 0xffffff;
+				const TWord t = readTx() & 0xffffff;
 				s = static_cast<int32_t>(t << 8) >> 8;
 			}
 			++idx;
@@ -309,10 +364,94 @@ namespace md::engine
 		auto& hi = m_periphX->getHI08();
 		const TWord go = 1;
 		hi.writeRX(&go, 1);
+		if(m_shadow)
+			m_shadow->m_periphX->getHI08().writeRX(&go, 1);
 		const auto start = m_dsp->getInstructionCounter();
 		if(!readBlock(_out, kMaxInstrBlock))
 			return false;
 		m_lastInstructions = m_dsp->getInstructionCounter() - start;
 		return true;
+	}
+
+	uint32_t VoiceEngine::readTx()
+	{
+		const TWord w = m_periphX->getHI08().readTX();
+		if(m_shadow)	// the shadow has sent the same words by now (lockstep() keeps it at the same instruction count)
+		{
+			auto& shadowHi = m_shadow->m_periphX->getHI08();
+			const TWord s = shadowHi.hasTX() ? shadowHi.readTX() : ~TWord(0);
+			if(s != w)
+			{
+				std::ostringstream o;
+				o << "JIT lockstep: host word " << std::hex << w << " from the JIT, " << s << " from the interpreter";
+				m_fault = o.str();
+				std::fprintf(stderr, "%s\n", m_fault.c_str());
+				m_shadow.reset();	// reported once; the JIT engine carries on alone
+			}
+		}
+		return w;
+	}
+
+	// MD_JIT_LOCKSTEP: after each JIT block, run the interpreter-driven shadow to the same instruction count (the
+	// interpreter runs a whole DO loop in one exec(), so whichever is behind steps) and compare the registers. Memory is
+	// not compared: a wrong store shows up in the registers soon after. SR's E, U and N bits are left out (the
+	// interpreter's CLR sets them but keeps a pending lazy update from the previous ALU op, which a later read of SR
+	// applies; nothing in the voice program reads them in between, the JIT is right). The first difference becomes the
+	// engine's fault (faultReason(), and on stderr) and ends the lockstep; rendering carries on with the JIT alone, so a
+	// run still ends with its hash. Slow (about 2x the interpreter): for checking a JIT change, not for playing.
+	void VoiceEngine::lockstep(const uint32_t _blockPc)
+	{
+		auto& jit = *m_dsp;
+		auto& interp = *m_shadow->m_dsp;
+		++m_lockstepBlocks;
+		for(;;)
+		{
+			if(interp.getInstructionCounter() < jit.getInstructionCounter())
+				interp.execInterpreter();
+			else if(jit.getInstructionCounter() < interp.getInstructionCounter())
+				jit.exec();
+			else
+				break;
+		}
+		const auto& a = jit.regs();
+		const auto& b = interp.regs();
+		std::string d;
+		auto cmp = [&](const char* _name, const int _index, const uint64_t _jit, const uint64_t _interp)
+		{
+			if(_jit == _interp)
+				return;
+			char s[96];
+			std::snprintf(s, sizeof(s), " %s%s jit=%llx interp=%llx", _name, _index >= 0 ? std::to_string(_index).c_str() : "",
+				static_cast<unsigned long long>(_jit), static_cast<unsigned long long>(_interp));
+			d += s;
+		};
+		constexpr uint64_t kNoEUN = ~uint64_t(CCR_E | CCR_U | CCR_N);
+		cmp("pc", -1, a.pc.var, b.pc.var);
+		cmp("sr", -1, jit.getSR().var & kNoEUN, interp.getSR().var & kNoEUN);
+		cmp("omr", -1, a.omr.var, b.omr.var);
+		cmp("x", -1, a.x.var, b.x.var);
+		cmp("y", -1, a.y.var, b.y.var);
+		cmp("a", -1, a.a.var, b.a.var);
+		cmp("b", -1, a.b.var, b.b.var);
+		for(int i = 0; i < 8; ++i)
+		{
+			cmp("r", i, a.r[i].var, b.r[i].var);
+			cmp("n", i, a.n[i].var, b.n[i].var);
+			cmp("m", i, a.m[i].var, b.m[i].var);
+		}
+		cmp("la", -1, a.la.var, b.la.var);
+		cmp("lc", -1, a.lc.var, b.lc.var);
+		cmp("sp", -1, a.sp.var, b.sp.var);
+		cmp("sc", -1, a.sc.var, b.sc.var);
+		for(int i = 0; i < static_cast<int>(a.ss.size()); ++i)	// SSL holds stacked SRs: E/U/N left out as above
+			cmp("ss", i, a.ss[i].var & kNoEUN, b.ss[i].var & kNoEUN);
+		if(d.empty())
+			return;
+		std::ostringstream o;
+		o << "JIT lockstep: registers differ after JIT block " << m_lockstepBlocks << " (from P:$" << std::hex << _blockPc
+		  << " to $" << a.pc.var << std::dec << ", instruction " << jit.getInstructionCounter() << "):" << d;
+		m_fault = o.str();
+		std::fprintf(stderr, "%s\n", m_fault.c_str());
+		m_shadow.reset();	// reported once; the JIT engine carries on alone
 	}
 }

@@ -96,7 +96,7 @@ What you get:
 |---|---|
 | `build/src/plugin/MdOne_artefacts/Release/Standalone/Moduledrum.app` | standalone app |
 | `build/src/plugin/MdOne_artefacts/Release/AU/Moduledrum.component`, `.../VST3/Moduledrum.vst3` | plugins, also copied to `~/Library/Audio/Plug-Ins/` |
-| `build/src/cli/md-hash`, `md-machines`, `md-kits` | the command-line tools |
+| `build/src/cli/md-hash`, `md-machines`, `md-kits`, `md-voicediag` | the command-line tools |
 | `build/src/plugin/MdPluginCheck_artefacts/Release/MdPluginCheck` | `md-plugin-check`, the plugin's headless checks |
 
 ### Build options
@@ -107,7 +107,7 @@ What you get:
 | `MD_BUILD_TESTS` | `ON` | Build the unit tests. |
 | `MD_COPY_PLUGINS` | `ON` | Copy the plugins to `~/Library/Audio/Plug-Ins/` after each build. |
 | `MD_OS_SYX` | *(empty)* | Path to your OS file. Used by the tests and the command-line tools. |
-| `MD_USE_JIT` | `OFF` | Run the emulated DSP on dsp56300's JIT instead of its interpreter. Experimental: it does not boot yet. |
+| `MD_USE_JIT` | `ON` | Run the emulated DSP on dsp56300's JIT. `OFF` uses its interpreter: the same audio, bit for bit, at about four times the CPU. The configure step applies `ext/patches/0001-dsp56300-md.patch` (JIT fixes) to the `ext/dsp56300` checkout, so that submodule shows as modified. |
 
 ### Tests
 
@@ -122,7 +122,9 @@ the plugin's parameters and saved state, and the editor's kit browser. `plugin-e
 don't commit them).
 
 The golden test checks that `md-hash`'s pattern still renders bit for bit what it did: `build/src/cli/md-hash <OS.syx>`
-prints `hash 04ef1db4fe767721` with OS 1.63, and `MD_GROUPS=2` must print the same.
+prints `hash 04ef1db4fe767721` with OS 1.63, with the JIT and with the interpreter, and `MD_GROUPS=2` must print the same.
+`MD_JIT_LOCKSTEP=1` (JIT builds) runs a second copy of the voice DSP on the interpreter next to every JIT one and stops
+at the first register that differs.
 
 ## How it works
 
@@ -155,9 +157,9 @@ The engine in `src/core/md` is sd88me's, vendored from Machinemodule for MPC OS
   MID, CTR and RAM machines are silent too.
 - **No sequencer.** Moduledrum plays the 16 tracks from MIDI notes. Patterns, songs, parameter locks and trigger groups
   are not modelled.
-- **CPU.** The emulated DSP runs on dsp56300's interpreter (the JIT does not boot the voice harness yet). On Apple
-  Silicon, 16 tracks cost about 18% of one core on `md-hash`'s sparse pattern, and about 32% with every track
-  retriggered 8 times per beat.
+- **CPU.** The emulated DSP runs on dsp56300's JIT, bit-exact with its interpreter. On Apple Silicon, 16 tracks cost
+  about 5% of one core on `md-hash`'s sparse pattern and about 7% with every track retriggered 8 times per beat
+  (the interpreter: 18% and 32%). An idle instance still runs the whole DSP every block.
 - **macOS only** for now, and no packaged release.
 
 ## Settings and data

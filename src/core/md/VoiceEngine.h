@@ -26,11 +26,13 @@ namespace md::engine
 
 		using Block = std::array<std::array<int32_t, kBlockFrames>, kVoices>;	// [voice][frame], 24-bit signed
 
-		explicit VoiceEngine(const fw::Firmware& _fw);
+		// _boot false: the program and the harness are loaded and PC is at the program's entry, but nothing has run (for
+		// tools that step the DSP themselves, md-voicediag); renderBlock needs a booted engine.
+		explicit VoiceEngine(const fw::Firmware& _fw, bool _boot = true);
 		~VoiceEngine();
 
-		// Load the program, run its own init, install the harness. Throws on failure.
-		void reset();
+		// Load the program, install the harness, run the program's own init (if _boot). Throws on failure.
+		void reset(bool _boot = true);
 
 		// Write a voice slot (up to kSlotWords words) for the next block. Word 0 is the trigger/machine
 		// code: non-zero only on the block the voice is (re)triggered; the DSP clears it.
@@ -52,10 +54,14 @@ namespace md::engine
 		dsp56k::DSP& dsp() { return *m_dsp; }
 
 	private:
+		VoiceEngine(const fw::Firmware& _fw, bool _boot, bool _shadow);
+		void configureJit();
 		void loadImage(const fw::DspImage& _img);
 		void installHarness();
 		bool runUntilTx(size_t _words, uint64_t _maxInstructions);
 		bool readBlock(Block& _out, uint64_t _maxInstructions);
+		uint32_t readTx();
+		void lockstep(uint32_t _blockPc);
 
 		const fw::Firmware& m_fw;
 		std::unique_ptr<dsp56k::DefaultMemoryValidator> m_validator;
@@ -67,5 +73,11 @@ namespace md::engine
 		int m_lastActive = 0;
 		std::array<uint32_t, kVoices> m_voiceInstr{};
 		std::string m_fault;
+
+		// MD_JIT_LOCKSTEP=1 (JIT builds): a second engine runs the same program on the interpreter, fed the same host
+		// writes, and after every JIT block both must hold the same registers and send the same host words (see lockstep()).
+		std::unique_ptr<VoiceEngine> m_shadow;
+		bool m_isShadow = false;
+		uint64_t m_lockstepBlocks = 0;
 	};
 }
