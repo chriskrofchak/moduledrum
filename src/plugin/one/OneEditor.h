@@ -6,10 +6,14 @@
 //
 // The LCD (.clew increment 0008), laid out as sd88me/mpc-vst-machinedrum's MPC skin: the header (the selected track's
 // machine, which opens the machine picker; the loaded kit; the product name), the selected track's four pages in
-// Monomodule's 2x2: SYN | AMP/EFX over ROUTE | LFO, and along the bottom the GLOBAL tab and the 16 tracks. Every cell is a knob on its host parameter (OneParams.h), turned as
+// Monomodule's 2x2: SYN | AMP/EFX over ROUTE | LFO, and along the bottom the GLOBAL and MASTER tabs and the 16 tracks.
+// Every cell is a knob on its host parameter (OneParams.h), turned as
 // in Monomodule: drag (up or right turns it up), the mouse wheel, shift for fine steps, a click on the value to type
 // it or pick it from a list, a double-click on the dial for the default. The GLOBAL tab: the 16 LEV faders (MIXER),
-// the global parameters (TEMPO, CHAN, NOTES, ACCNT) with INIT KIT and EXPORT, and the kit browser (KitBrowser.h). A
+// the global parameters (TEMPO, CHAN, NOTES, ACCNT, and MASTER: the master effects on or off) with INIT KIT and
+// EXPORT, and the kit browser (KitBrowser.h). The MASTER tab (.clew increment 0009): the master effects' four pages in
+// the same 2x2, in the hardware's page order: ECHO (rhythm echo) | REV (gate box) over EQ (master EQ) | DYN (dynamix),
+// with the hardware's labels; their titles say OFF while the master is switched off. A
 // .syx dropped anywhere on the editor is copied into the kit folder and shown there; a Machinedrum OS file dropped
 // becomes the OS file.
 #pragma once
@@ -85,6 +89,7 @@ public:
     // double-click resets it to (the parameter's default, which for SYN1-8 is the machine's)
     void describe(int k, const spec::Param& d);
     void setTitle(const juce::String& title) { if (title != m_title) { m_title = title; repaint(); } }
+    const juce::String& title() const { return m_title; }
     // Text shown inside the page's frame in place of the knobs (no OS file loaded); empty: the knobs.
     void setMessage(const juce::StringArray& lines);
     // Tag drawn at the right end of the title bar (e.g. "SILENT"); empty clears it.
@@ -92,6 +97,9 @@ public:
     // Names that depend on other parameters (LFO PARAM follows the destination track's machine): re-read, and
     // repainted when they changed (the editor's timer)
     void refreshText();
+    // Blank cell k shares one frame with the cell on its left (no divider between them): the room for a control laid
+    // over several cells (the GLOBAL page's INIT KIT and EXPORT)
+    void joinLeft(int k) { m_joined |= 1u << k; repaint(); }
 
     int numCells() const { return int(m_cells.size()); }
     const juce::StringArray& message() const { return m_message; }
@@ -134,6 +142,7 @@ protected:
     juce::StringArray m_message;
     juce::TextEditor m_editor;
     int m_editing = -1;
+    uint32_t m_joined = 0;   // joinLeft
     juce::Component::SafePointer<juce::Component> m_listenedTop;   // window we listen on while editing
 };
 
@@ -176,18 +185,22 @@ private:
     bool m_open = false;
 };
 
-// The GLOBAL tab and the 16 tracks along the bottom of the LCD, where the MPC skin has its tab bar (GLOBAL first): each
-// track's key shows its number and its machine's short name, the selected key is inverted, and a track triggered by
-// MIDI (or the editor) flashes a bar under its name. A click selects; a press on the selected track's key plays it
-// (onPlay, while held), as a pad would.
+// The GLOBAL and MASTER tabs and the 16 tracks along the bottom of the LCD, where the MPC skin has its tab bar (the
+// tabs first): each track's key shows its number and its machine's short name, the selected key is inverted, and a
+// track triggered by MIDI (or the editor) flashes a bar under its name. A click selects; a press on the selected track's
+// key plays it (onPlay, while held), as a pad would.
 class TrackStrip : public juce::Component {
 public:
-    static constexpr int kGlobalW = 45, kCellW = 15, kLcdH = 20;   // LCD px
-    static constexpr int kLcdW = kGlobalW + 16 * kCellW + 1;
+    // LCD px: the tabs fit their names in the bold face; the 16 track keys share the rest, 12 or 13 px each (13 for the
+    // two-digit numbers, which are 9 px in bold)
+    static constexpr int kGlobalW = 39, kMasterW = 42, kTracksW = 204, kLcdH = 20;
+    static constexpr int kTracksX = kGlobalW + kMasterW;
+    static constexpr int kLcdW = kTracksX + kTracksW + 1;
     static constexpr int kGlobal = 16;    // the GLOBAL tab, as a 17th key (the first from the left)
+    static constexpr int kMaster = 17;    // the MASTER tab, as an 18th (the second)
     static constexpr int kFlashTicks = 4; // how long a trigger shows, in the editor's timer ticks (30 Hz)
     TrackStrip() { setOpaque(true); }
-    std::function<void(int)> onSelect;    // a track 0-15, or kGlobal
+    std::function<void(int)> onSelect;    // a track 0-15, kGlobal or kMaster
     std::function<void(int track, bool down)> onPlay;
     void setSelected(int key) { if (key != m_selected) { m_selected = key; repaint(); } }
     int selected() const { return m_selected; }
@@ -269,12 +282,16 @@ public:
     void fileDragExit(const juce::StringArray&) override { m_dragOver = false; repaint(); }
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
-    // The pages' keys (page()), the track pages then the GLOBAL tab's
-    enum Page { Syn, Effects, Routing, Lfo, Global, Mixer, kNumPages };
+    // The pages' keys (page()), the track pages, the GLOBAL tab's, then the MASTER tab's (the hardware's page order)
+    enum Page { Syn, Effects, Routing, Lfo, Global, Mixer, Echo, Rev, Eq, Dyn, kNumPages };
+    static constexpr Page kMasterPages[4] = {Echo, Rev, Eq, Dyn};   // params::kMasterPageBlocks: block 1, 0, 2, 3
+    static constexpr int kMasterCell = 7;                           // the GLOBAL page's MASTER (on/off) cell
     void selectTrack(int t);   // binds every page to track t (0-15) and shows them
     void showGlobal();         // the GLOBAL tab
+    void showMaster();         // the MASTER tab
     int selectedTrack() const { return m_track; }
     bool globalShown() const { return m_global; }
+    bool masterShown() const { return m_master; }
     void openMachinePicker(bool animate = true);
     // dev/snapshot/tests
     void refresh() { timerCallback(); }   // pick up the processor's state without the message loop
@@ -321,7 +338,7 @@ private:
 
     MdOneProcessor& m_proc;
     KitLibrary m_library;
-    MachineBar m_machineBar, m_globalTitle;
+    MachineBar m_machineBar, m_globalTitle, m_masterTitle;
     KitBox m_kitBox;
     TrackStrip m_strip;
     std::array<std::unique_ptr<KnobPage>, kNumPages> m_pages;
@@ -337,6 +354,7 @@ private:
     bool m_showStatus = false;
     int m_track = 0;              // the track the pages show
     bool m_global = false;        // the GLOBAL tab shows
+    bool m_master = false;        // the MASTER tab shows
     std::array<int, 16> m_machines{};   // each track's machine as last shown (-1: not yet)
     int m_shownMachine = -1;      // the machine the SYN page describes
     juce::String m_tableKey;      // which machine table the editor shows (the OS file and whether it loaded)

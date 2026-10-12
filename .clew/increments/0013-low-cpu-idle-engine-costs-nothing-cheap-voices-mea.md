@@ -24,6 +24,13 @@ idle instance still runs the whole DSP every block.
   settled, the whole block is zeros: skip the DSP and the mixer entirely, keep the tick counter / LFO phases advancing
   cheaply (or document that LFO phase restarts on the next note; TRIG-type LFOs restart anyway). Must keep the regression
   hashes (`04ef1db4fe767721`, `a28b9dc178776939`): an exactness test that compares skip on/off over a pattern with gaps.
+- **The master effects** (increment 0009, step 7b moved here): with `master_fx` on (the default) a second emulated DSP
+  runs DSP1's master pass every block, ~12 us (bench: 9.0 % with it, 7.2 % with it off at 44.1 kHz), whether anything
+  plays or not. An idle skip of it is not exact-trivial: it has feedback (echo, reverb) and free-running state (the
+  echo's write phase Y:$159 advances every block, the modulation phase), so it needs an analysis of which state words are
+  time-shift invariant once the rings have decayed to zero, and a test against the unskipped pass (`tests/Dsp1Reference`,
+  ctest `master`). `masterBypass` already skips it while `master_fx` is off. Its memory: ~215 MB per engine (mostly the
+  JIT's block chains, archive 0009 section 10).
 - **Silence release** exists in `HostModel::setSilenceRelease` (MPC port, off by default, not bit-exact: a freed voice
   restarts fresh). Consider it as a user option ("eco mode"), never the default.
 - **Resampler cost** at 48/96 kHz: measure; Monomodule's converter is band-limited and may dominate when the engine is idle.

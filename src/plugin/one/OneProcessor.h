@@ -7,7 +7,8 @@
 // hardware's white keys from C2 by default, or the chromatic 36-51 / 0-15 map); the host's tempo drives the LFOs and the
 // E12 retrigs. The engine renders its 32-frame blocks at 44.1 kHz synchronously inside processBlock, as Monomodule's
 // MonoVoice does, and Monomodule's band-limited converter (src/core/dsp/Resampler) takes them to any other host rate.
-// Outputs: the dry main mix, one mono bus per track and the reverb and delay sends (stereo). A track routed to its own
+// Outputs: the main mix (since increment 0009 through the master effects, below), one mono bus per track and the reverb
+// and delay sends (stereo). A track routed to its own
 // bus leaves the main mix and still feeds the sends, as a track routed to an individual output does on the hardware
 // (EngineT::dryMute).
 //
@@ -24,6 +25,16 @@
 // kit (md::library::Kit) is the canonical form of the sound: parameters and kit convert both ways (kitToParameters,
 // parametersToKit), and the kit's other contents (name, master effects, LFO state, trig and mute groups) are kept, so
 // a session exports as a kit dump with md::library::encodeKit. The state is a versioned XML of all of it.
+//
+// The master effects (.clew increment 0009): the Machinedrum's rhythm echo, gate box reverb, master EQ and dynamix,
+// which the engine runs on a second emulated DSP behind the mix (md::engine::MasterFx). Their 32 kit bytes are host
+// parameters too (OneParams.h, group "Master FX"), fed to HostModel::setMasterFx, which takes them through the OS's own
+// smoothing, so an edit glides as on the hardware; a kit load (and a restored state, and a new engine) starts at its
+// settings at once (EngineT::primeMaster). With master_fx on (the default) the main bus is the master section's output
+// (the dry mix through the echo, the reverb, the EQ and the dynamix); it comes out md::engine::master::kDryLatency (18)
+// engine frames after the dry mix, so the track buses and the send buses (dry, before the master, as on the hardware's
+// individual outputs) are delayed by as much, every bus lands on the same engine frame, and the 18 frames are part of
+// the reported latency. Off: the dry main mix, no delay, exactly the path before the master existed.
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -56,7 +67,8 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    // The master section rings on after the last note: the echo (a 2.2 s ring with feedback) and the reverb (up to 3 s)
+    double getTailLengthSeconds() const override { return masterActive() ? kMasterTailSeconds : 0.0; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -84,10 +96,15 @@ public:
     static constexpr int kWarmUpBlocks = 16;          // silent blocks rendered after boot, before the engine goes live
     static constexpr int kTracks = 16;
     static constexpr int kParams = md::engine::HostModel<>::kParams;   // SYN1-8, AMD..SRR, DIST, VOL, PAN, DEL, REV, LFOS, LFOD, LFOM
-    static constexpr int kStateSchema = 2;
+    static constexpr int kStateSchema = 3;
+    static constexpr int kMasterParams = md::engine::master::kParams;   // the kit's master bytes
+    static_assert(kMasterParams == params::kMasterParams, "OneParams.h has a parameter per master byte");
+    static constexpr int kMasterLatency = md::engine::master::kDryLatency;   // engine frames the master output is late
+    static constexpr double kMasterTailSeconds = 6.0;
 
-    // Output buses: 0 = main (stereo, the dry mix), 1-16 = tracks 1-16 (mono; a stereo layout gets the track on both
-    // sides), 17 = reverb send, 18 = delay send (stereo). Only the main bus is on by default.
+    // Output buses: 0 = main (stereo: the master section's output, or the dry mix with master_fx off), 1-16 = tracks 1-16
+    // (mono; a stereo layout gets the track on both sides), 17 = reverb send, 18 = delay send (stereo; the dry sends, before
+    // the master). Only the main bus is on by default.
     static constexpr int kTrackBus = 1, kReverbBus = kTrackBus + kTracks, kDelayBus = kReverbBus + 1, kNumBuses = kDelayBus + 1;
 
     // ---- Host parameters (OneParams.h) ----
@@ -98,6 +115,9 @@ public:
     juce::AudioParameterInt& midiChannelParameter() const { return *m_midiChannelParam; }
     juce::AudioParameterInt& accentParameter() const { return *m_accentParam; }
     juce::AudioParameterChoice& noteMapParameter() const { return *m_noteMapParam; }
+    // The master effects: master_fx, and byte i (0-31, the kit dump's order: reverb, echo, EQ, dynamix; OneParams.h)
+    juce::AudioParameterBool& masterOnParameter() const { return *m_masterOnParam; }
+    juce::AudioParameterInt& masterParameter(int i) const { return *m_masterParam[size_t(i)]; }
 
     // The sound through the parameters, for code (the host and an editor use the parameters themselves). Setters notify
     // the host; values are raw as in a kit, clamped to each parameter's range; parameters in HostModel order.
@@ -136,6 +156,16 @@ public:
     // Track 0-15 for a MIDI note under the current note map, -1 for a note it does not use; noteForTrack for pads
     int trackForNote(int note) const { return params::trackForNote(note, noteMap()); }
     int noteForTrack(int track) const { return params::noteForTrack(track, noteMap()); }
+    // The master effects. Byte i (0-31) as a kit stores it; an edit glides in through the OS's smoothing, as on the MD.
+    void setMasterFx(int i, int value);
+    int masterFx(int i) const { return masterParameter(i).get(); }
+    // master_fx: the master section's output on the main bus (with every other bus delayed to line up with it, and the
+    // latency to match), or the dry mix. On the message thread the reported latency follows at once, else at the next
+    // timer tick (the audio switches at the next block either way).
+    void setMasterOn(bool on);
+    bool masterOn() const { return m_masterOnParam->get(); }
+    // master_fx on and an engine with the master section (OS 1.63 has it): what the latency and the tail are reported for
+    bool masterActive() const { return m_masterOnParam->get() && m_masterAvailable.load(std::memory_order_relaxed); }
     // Notes from the editor (an on-screen keyboard or pads): played on any MIDI channel setting, through the note map
     juce::MidiKeyboardState& keyboardState() { return m_keyboard; }
     // Tracks triggered since the last call (bit t = track t+1), for trigger LEDs in the editor (any thread)
@@ -143,11 +173,13 @@ public:
 
     // ---- Kits ----
     // Loads a kit as the MD does: every track's machine, 24 parameters (SYN from the kit, not the machine's defaults),
-    // LEV and LFO page go to the parameters (the host is notified), and the kit's other contents are kept for export.
+    // LEV and LFO page, and the kit's master effects go to the parameters (the host is notified), and the kit's other
+    // contents are kept for export. The master section starts at the kit's settings at the next block (no glide).
     // `bank` names where it came from (shown with the kit's name; saved with the state). Message thread.
     void loadKit(const md::library::Kit& kit, const juce::String& bank = {});
     void loadDefaultKit();   // the default kit a fresh instance plays (TRX and EFM machines, see OneProcessor.cpp)
-    // The kit's machines, parameters, levels and LFO pages -> the host parameters (machine before SYN on each track)
+    // The kit's machines, parameters, levels, LFO pages and master bytes -> the host parameters (machine before SYN on
+    // each track)
     void kitToParameters(const md::library::Kit& kit);
     // The loaded kit with the parameters' current values: what md::library::encodeKit exports. Values the parameters
     // cannot hold (an LFO shape over 5, say) are kept from the kit while the parameter shows their clamped value.
@@ -167,13 +199,19 @@ public:
     // The default of SYN k (0-7) for a machine, -1 if unknown (no OS file, or an unused id); any thread, lock-free
     int synDefault(int machineId, int k) const;
 
-    // Host samples the rate conversion delays the output by (0 at 44.1 kHz); reported as the plugin's latency
-    int conversionLatency() const { return m_outLag; }
+    // Host samples the output is late, reported as the plugin's latency: the rate conversion (0 at 44.1 kHz) and, while
+    // the master is active, its 18 engine frames (18 samples at 44.1 kHz; with a conversion both are one delay, rounded up)
+    int conversionLatency() const { return masterActive() ? m_outLagMaster : m_outLag; }
+
+    // For tests: the master DSP's compiled JIT blocks (MasterFx::compiledBlocks; a live block that adds one stalls on the
+    // compile), -1 without an engine or a master section. Message thread, not while processBlock runs.
+    int masterCompiledBlocks() const;
 
 private:
     using Engine = md::engine::Engine;
     class MachineParam;
     class SynParam;
+    class MasterOnParam;
     static BusesProperties makeBuses();
     void createParameters();
     void loadEngine();
@@ -190,7 +228,8 @@ private:
     void synChanged(int track, int k, int value);    // SynParam::valueChanged, any thread
     void refreshSynNames(uint32_t tracks);
     int machineFromText(const juce::String& text) const;   // a machine's name or id as text -> its id
-    void timerCallback() override { handleParameterChanges(); }
+    void updateLatency();   // message thread: the reported latency after master_fx (and the engine's master section)
+    void timerCallback() override { handleParameterChanges(); updateLatency(); }
 
     juce::String m_firmwarePath;
     // The engine refers to its firmware: both are replaced together under m_engineLock, the engine destroyed first.
@@ -209,6 +248,12 @@ private:
     juce::AudioParameterInt* m_midiChannelParam = nullptr;
     juce::AudioParameterInt* m_accentParam = nullptr;
     juce::AudioParameterChoice* m_noteMapParam = nullptr;
+    juce::AudioParameterBool* m_masterOnParam = nullptr;
+    std::array<juce::AudioParameterInt*, kMasterParams> m_masterParam{};
+    std::atomic<bool> m_masterAvailable{true};   // the engine has the master section (true until an engine says otherwise)
+    // Set after a kit load, a restored state or a new engine (once the parameters hold the new values): the next block
+    // settles the master section at them (EngineT::primeMaster) instead of letting them glide in
+    std::atomic<bool> m_primeMaster{true};
 
     // The machine and SYN1-8 as the engine is to play them. Written by the parameters' valueChanged (any thread): a
     // machine change stores the machine's SYN defaults first and the machine last, so processBlock (which reads the
@@ -242,6 +287,8 @@ private:
     std::array<Applied, kTracks> m_applied;
     long m_appliedTempo = -1;   // BPM x 24, as HostModel::setTempo stores it
     int m_appliedAccent = -1;
+    std::array<int, kMasterParams> m_appliedMaster{};
+    bool m_masterMode = false;  // this block: the main bus is the master output, the other streams delayed (audio thread)
     std::array<std::atomic<bool>, kTracks> m_ownBus{};
     std::atomic<double> m_currentBpm{120.0};
     juce::MidiKeyboardState m_keyboard;
@@ -255,6 +302,10 @@ private:
     int m_blockAvail = 0;                                                // its frames not yet consumed
     std::array<std::vector<float>, kStreams> m_eng;                      // this chunk's frames, per stream
     uint32_t m_ownMask = 0;                                              // tracks out of the main mix, on their own bus
+    // The last kMasterLatency frames of every stream but the main pair, fed every block: in master mode those streams are
+    // played this much later, in step with the master output (whose dry path is that late), and switching the mode on
+    // finds them filled
+    std::array<std::array<float, kMasterLatency>, kStreams> m_alignTail{};
 
     // The clock, as Monomodule's (see Resampler.h). The engine runs at 44.1 kHz whatever the host's rate: host sample s
     // is engine time s * 44100 / rate, exactly. A host block is processed in chunks of at most m_maxChunk samples; each
@@ -268,6 +319,10 @@ private:
     std::atomic<int> m_statusLag{0};
     int m_maxChunk = 512, m_maxEngine = 512;    // host samples / engine frames per chunk at most
     int m_outLag = 0;                           // host samples
+    // The same in master mode, where every stream is kMasterLatency engine frames late: output m reads the streams at
+    // engine time (m - m_outLagMaster) * 44100 / rate + kMasterLatency, so the output is the sound m_outLagMaster host
+    // samples late, a whole number however the 18 frames fall on the host's grid (at 44.1 kHz: 18, read at m)
+    int m_outLagMaster = kMasterLatency;
     int64_t m_hostPos = 0, m_enginePos = 0;     // processed since prepareToPlay
     dsp::SincKernel m_toHost;                   // engine -> host rate
     dsp::RateMap m_engineAt;                    // engine position of a host sample

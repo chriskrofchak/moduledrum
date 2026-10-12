@@ -42,13 +42,12 @@ md::library::Kit defaultKit()
         k.lfo[t].destTrack = uint8_t(t);
         k.trigGroup[t] = k.muteGroup[t] = 0xff;
     }
-    // a cleared kit's master effects on an MD (OS 1.63): gate box, rhythm echo, EQ flat, dynamix
-    k.masterFx.reverb = {0, 0, 64, 0, 0, 127, 127, 96};
-    k.masterFx.delay = {32, 0, 32, 0, 0, 127, 0, 96};
-    k.masterFx.eq = {64, 64, 64, 64, 64, 64, 64, 127};
-    k.masterFx.dynamics = {127, 127, 127, 127, 127, 127, 0, 0};
+    // a cleared kit's master effects on an MD (OS 1.63), md::engine::master::kDefaultParams: gate box 0 0 64 0 0 127 127 96,
+    // rhythm echo 32 0 32 0 0 127 0 96, EQ flat (64 x 7, GAIN 127), dynamix 127 x 6, 0 0. A new engine starts on them.
+    k.masterFx.setBytes(md::engine::master::kDefaultParams.data());
     return k;
 }
+constexpr auto& kDefaultMaster = md::engine::master::kDefaultParams;
 
 // A kit's value for a track's parameter slot (OneParams.h), and the other way
 int kitValue(const md::library::Kit& k, int track, int slot)
@@ -93,6 +92,11 @@ public:
                                       .withValueFromStringFunction([&p](const juce::String& s) { return p.machineFromText(s); })),
           m_p(p), m_track(track) {}
 
+    // A machine change rewrites SYN1-8 (the machine's defaults): hosts must know that setting it changes other parameters
+    // (AU: kAudioUnitParameterFlag_IsGlobalMeta, without which auval -oop fails "Parameter values are different since last
+    // set"; .clew increment 0019). It is the only parameter that rewrites others.
+    bool isMetaParameter() const override { return true; }
+
 private:
     void valueChanged(int v) override { m_p.machineChanged(m_track, v); }
     MdOneProcessor& m_p;
@@ -117,6 +121,25 @@ private:
     void valueChanged(int v) override { m_p.synChanged(m_track, m_k, v); }
     MdOneProcessor& m_p;
     const int m_track, m_k;
+};
+
+// master_fx: the audio follows at the next block on any thread; the reported latency at once when the change is made on
+// the message thread (the editor, setMasterOn, a restored state), else at the processor's next timer tick
+class MdOneProcessor::MasterOnParam final : public juce::AudioParameterBool {
+public:
+    explicit MasterOnParam(MdOneProcessor& p)
+        : juce::AudioParameterBool(juce::ParameterID{params::kMasterFxId, 1}, "MASTER FX", true,
+                                   juce::AudioParameterBoolAttributes()
+                                       .withStringFromValueFunction([](bool v, int) { return juce::String(v ? "ON" : "OFF"); })
+                                       .withValueFromStringFunction([](const juce::String& s) {
+                                           const auto t = s.trim();
+                                           return t.equalsIgnoreCase("ON") || t.getIntValue() != 0;
+                                       })),
+          m_p(p) {}
+
+private:
+    void valueChanged(bool) override { if (juce::MessageManager::existsAndIsCurrentThread()) m_p.updateLatency(); }
+    MdOneProcessor& m_p;
 };
 
 void MdOneProcessor::createParameters()
@@ -191,6 +214,25 @@ void MdOneProcessor::createParameters()
     m_noteMapParam = noteMap.get();
     global->addChild(std::move(tempo), std::move(channel), std::move(accent), std::move(noteMap));
     addParameterGroup(std::move(global));
+
+    // The master effects: master_fx, then a sub-group per block in the kit dump's order (REV, ECHO, EQ, DYN), raw bytes
+    // defaulting to the init kit's (a cleared MD kit's)
+    auto master = std::make_unique<juce::AudioProcessorParameterGroup>(params::kMasterGroupId, "Master FX", "|");
+    auto on = std::make_unique<MasterOnParam>(*this);
+    m_masterOnParam = on.get();
+    master->addChild(std::move(on));
+    for (int b = 0; b < params::kMasterBlocks; ++b) {
+        auto block = std::make_unique<juce::AudioProcessorParameterGroup>(params::masterBlockGroupId(b), params::kMasterBlockNames[size_t(b)], "|");
+        for (int k = 0; k < params::kMasterBlockParams; ++k) {
+            const int i = b * params::kMasterBlockParams + k;
+            auto p = std::make_unique<juce::AudioParameterInt>(juce::ParameterID{params::masterId(i), 1}, params::masterName(i), 0, 127, int(kDefaultMaster[size_t(i)]));
+            m_masterParam[size_t(i)] = p.get();
+            block->addChild(std::move(p));
+        }
+        master->addChild(std::move(block));
+    }
+    addParameterGroup(std::move(master));
+    m_appliedMaster.fill(-1);
     jassert(getParameters().size() == params::kTotal);
 }
 
@@ -343,6 +385,25 @@ void MdOneProcessor::setTempo(double bpm) { setRawValue(*m_tempoParam, float(juc
 void MdOneProcessor::setAccent(int amount) { setRawValue(*m_accentParam, float(juce::jlimit(0, 127, amount))); }
 void MdOneProcessor::setNoteMap(NoteMap map) { setRawValue(*m_noteMapParam, float(int(map))); }
 
+void MdOneProcessor::setMasterFx(int i, int value)
+{
+    if (juce::isPositiveAndBelow(i, kMasterParams)) setRawValue(masterParameter(i), float(juce::jlimit(0, 127, value)));
+}
+
+void MdOneProcessor::setMasterOn(bool on) { setRawValue(*m_masterOnParam, on ? 1.0f : 0.0f); }   // MasterOnParam: the latency
+
+void MdOneProcessor::updateLatency()
+{
+    if (const int lag = conversionLatency(); lag != getLatencySamples()) setLatencySamples(lag);
+}
+
+int MdOneProcessor::masterCompiledBlocks() const
+{
+    const juce::ScopedLock sl(m_engineLock);
+    auto* master = m_engine != nullptr ? m_engine->master() : nullptr;
+    return master != nullptr ? int(master->compiledBlocks()) : -1;
+}
+
 // ---- Kits ----
 
 void MdOneProcessor::kitToParameters(const md::library::Kit& kit)
@@ -350,6 +411,8 @@ void MdOneProcessor::kitToParameters(const md::library::Kit& kit)
     for (int t = 0; t < kTracks; ++t)
         for (int slot = 0; slot < params::kTrackParams; ++slot)   // the machine first: it resets SYN1-8, the kit's values go over them
             setRaw(t, slot, kitValue(kit, t, slot));
+    const auto master = kit.masterFx.bytes();
+    for (int i = 0; i < kMasterParams; ++i) setMasterFx(i, master[size_t(i)]);
     if (juce::MessageManager::existsAndIsCurrentThread()) handleParameterChanges();
 }
 
@@ -366,6 +429,13 @@ md::library::Kit MdOneProcessor::parametersToKit() const
             const int v = parameter(t, slot).get();
             if (juce::jlimit(0, params::maxOf(slot), int(field)) != v) field = uint8_t(v);   // else keep what the kit had
         }
+    auto master = kit.masterFx.bytes();
+    for (int i = 0; i < kMasterParams; ++i) {
+        uint8_t& field = master[size_t(i)];
+        const int v = masterFx(i);
+        if (juce::jlimit(0, 127, int(field)) != v) field = uint8_t(v);
+    }
+    kit.masterFx.setBytes(master.data());
     return kit;
 }
 
@@ -377,6 +447,7 @@ void MdOneProcessor::loadKit(const md::library::Kit& kit, const juce::String& ba
         m_kitBank = bank;
     }
     kitToParameters(kit);
+    m_primeMaster.store(true);   // after the parameters: the block that sees it has them all
 }
 
 void MdOneProcessor::loadDefaultKit()
@@ -447,14 +518,16 @@ void MdOneProcessor::loadEngine()
         fwNew = std::make_unique<fw::Firmware>(fw::loadFirmware(path));   // throws on anything but a Machinedrum OS
         auto c = fw::parseContainer(fw::parseSysex(fw::readFile(path)));
         engNew = std::make_unique<Engine>(*fwNew, std::move(c.sections.at(0).data));   // boots the voice DSP
-        // Warm-up, off the audio thread: with nothing triggered, the booted engine must render silence.
+        // Warm-up, off the audio thread: with nothing triggered, the booted engine must render silence, the master
+        // section's output included (the engine compiled the master program when it was made, so the first live block
+        // runs no JIT compile there)
         Engine::Output out;
         for (int b = 0; b < kWarmUpBlocks; ++b) {
             if (!engNew->render(out)) throw std::runtime_error("voice DSP fault during warm-up: " + engNew->fault());
             const auto silent = [](const auto& frames) {
                 return std::all_of(frames.begin(), frames.end(), [](const auto& f) { return std::all_of(f.begin(), f.end(), [](int32_t s) { return s == 0; }); });
             };
-            if (!silent(out.mix.main) || !silent(out.mix.frame) || !silent(out.mix.rev) || !silent(out.mix.del))
+            if (!silent(out.mix.main) || !silent(out.mix.frame) || !silent(out.mix.rev) || !silent(out.mix.del) || !silent(out.master))
                 throw std::runtime_error("the engine is not silent after boot");
         }
         // Voice budget and silence release stay off (HostModel's defaults): every track runs its voice, as on the MD.
@@ -476,14 +549,19 @@ void MdOneProcessor::loadEngine()
         m_firmware = std::move(fwNew);
         m_engineBlocks = 0;
         m_status = status;
-        // the new engine starts from HostModel's defaults: every parameter and the tempo go to it at the next block
+        // the new engine starts from HostModel's defaults: every parameter and the tempo go to it at the next block, and the
+        // master section settles at them there
         for (auto& a : m_applied) { a.machine = -1; a.param.fill(-1); a.level = -1; a.lfo.fill(-1); }
         m_appliedTempo = -1;
         m_appliedAccent = -1;
+        m_appliedMaster.fill(-1);
+        m_primeMaster.store(true);
+        if (m_engine != nullptr) m_masterAvailable.store(m_engine->hasMaster());
         m_blockAvail = 0;
         m_notes.clear();
         m_engineReady = m_engine != nullptr;
     }
+    updateLatency();
 }
 
 void MdOneProcessor::setFirmwarePath(const juce::String& path, bool persist)
@@ -551,6 +629,14 @@ void MdOneProcessor::applyParameters()
         m_appliedAccent = accent;
         h.setAccentAmount(accent);
     }
+    // The master bytes are the OS's smoothing targets: a change glides in over the next ticks, as on the MD (a kit load
+    // settles at once: processBlock primes the master after this). Applied with master_fx off too: the DSP stands, but its
+    // words stay current, so switching it on plays the settings the parameters show.
+    for (int i = 0; i < kMasterParams; ++i)
+        if (const int v = m_masterParam[size_t(i)]->get(); v != m_appliedMaster[size_t(i)]) {
+            m_appliedMaster[size_t(i)] = v;
+            h.setMasterFx(i, v);
+        }
 }
 
 // ---- Audio ----
@@ -567,17 +653,22 @@ void MdOneProcessor::prepareClock(double sampleRate, int samplesPerBlock)
         // output m reads engine frames up to floor((m - outLag) * 44100 / rate) + H; the chunk ending at m has rendered
         // those up to floor(m * 44100 / rate): outLag * 44100 / rate >= H + 1 keeps every read inside (as Monomodule)
         m_outLag = int(std::ceil((m_toHost.halfTaps() + 1) * m_hostRate / kEngineRate));
+        // master mode reads kMasterLatency frames later in the streams, which are that much later themselves: the same
+        // bound with those frames added
+        m_outLagMaster = int(std::ceil((m_toHost.halfTaps() + 1 + kMasterLatency) * m_hostRate / kEngineRate));
         m_maxEngine = int(std::ceil(m_maxChunk * kEngineRate / m_hostRate)) + 2;
         historyFrames = m_maxEngine + 2 * m_toHost.halfTaps() + 64;
         m_taps.assign(size_t(m_toHost.numTaps()), 0.f);
     } else {
         m_outLag = 0;
+        m_outLagMaster = kMasterLatency;
         m_maxEngine = m_maxChunk;
     }
     m_statusRate.store(m_needsResample ? m_hostRate : 0.0);   // for statusText (message thread)
     m_statusLag.store(m_outLag);
     for (auto& s : m_eng) s.assign(size_t(m_maxEngine), 0.f);
     for (auto& h : m_hist) h.prepare(std::max(historyFrames, 1));
+    for (auto& t : m_alignTail) t.fill(0.f);
     m_lastSound.fill(-1);
     m_notes.clear();
     m_keyboardMidi.ensureSize(2048);
@@ -591,7 +682,7 @@ void MdOneProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         const juce::ScopedLock sl(m_engineLock);
         prepareClock(sampleRate, samplesPerBlock);
     }
-    setLatencySamples(m_outLag);
+    setLatencySamples(conversionLatency());
 }
 
 bool MdOneProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -644,6 +735,23 @@ bool MdOneProcessor::renderEngineBlock()
         for (int f = 0; f < Engine::kBlock; ++f)
             dst[size_t(f)] = float(md::engine::Mixer::solo(m_out.tracks[size_t(t)][size_t(f)], vol)) * kSampleScale;
     }
+    // Master mode: the main pair is the master section's output, whose dry path is kMasterLatency frames late; every other
+    // stream is played as much later, so that a sound lands on the same frame on every bus. The other streams' last frames
+    // are kept in either mode.
+    std::array<float, kMasterLatency + Engine::kBlock> line{};
+    for (int s = kStreamRev; s < kStreams; ++s) {
+        auto& b = m_block[size_t(s)];
+        auto& tail = m_alignTail[size_t(s)];
+        std::copy(tail.begin(), tail.end(), line.begin());
+        std::copy(b.begin(), b.end(), line.begin() + kMasterLatency);
+        std::copy(line.end() - kMasterLatency, line.end(), tail.begin());
+        if (m_masterMode) std::copy_n(line.begin(), Engine::kBlock, b.begin());
+    }
+    if (m_masterMode)
+        for (int f = 0; f < Engine::kBlock; ++f) {
+            m_block[kStreamMain][size_t(f)] = float(m_out.master[size_t(f)][0]) * kSampleScale;
+            m_block[kStreamMain + 1][size_t(f)] = float(m_out.master[size_t(f)][1]) * kSampleScale;
+        }
     return true;
 }
 
@@ -684,8 +792,9 @@ void MdOneProcessor::processChunk(int offset, int n)
 
 // The chunk's streams into the host channels (m_sinks) at `offset`. At 44.1 kHz the engine frames are the output, bit
 // for bit. Otherwise every stream keeps a history, fed whether it is heard or not (switching outputs never meets a
-// gap), and output sample m is the band-limited stream at engine time (m - outLag) * 44100 / rate: one set of taps per
-// sample, shared by every stream. A stream whose whole window is silent is skipped (its output stays 0).
+// gap), and output sample m is the band-limited stream at engine time (m - outLag) * 44100 / rate (in master mode
+// (m - m_outLagMaster) * 44100 / rate + kMasterLatency, the streams being that much late): one set of taps per sample,
+// shared by every stream. A stream whose whole window is silent is skipped (its output stays 0).
 void MdOneProcessor::writeOutputs(int offset, int n, int nEngine)
 {
     if (!m_needsResample) {
@@ -703,8 +812,9 @@ void MdOneProcessor::writeOutputs(int offset, int n, int nEngine)
             if (x[i] != 0.f) { m_lastSound[size_t(s)] = m_enginePos + i; break; }
     }
     const int half = m_toHost.halfTaps(), taps = m_toHost.numTaps();
-    const int64_t first = m_hostPos - m_outLag;
-    const int64_t earliest = m_engineAt.floorAt(first) - half + 1;   // the oldest frame this chunk's outputs read
+    const int shift = m_masterMode ? kMasterLatency : 0;   // whole engine frames: the taps' phase stays the host grid's
+    const int64_t first = m_hostPos - (m_masterMode ? m_outLagMaster : m_outLag);
+    const int64_t earliest = m_engineAt.floorAt(first) - half + 1 + shift;   // the oldest frame this chunk's outputs read
     std::array<const Sink*, kStreams> active{};
     int count = 0;
     for (int k = 0; k < m_numSinks; ++k)
@@ -715,7 +825,7 @@ void MdOneProcessor::writeOutputs(int offset, int n, int nEngine)
         const float* t = m_toHost.taps(at, m_taps.data());
         for (int a = 0; a < count; ++a) {
             const auto& sink = *active[size_t(a)];
-            const float v = m_hist[size_t(sink.stream)].dot(at.index - half + 1, t, taps);
+            const float v = m_hist[size_t(sink.stream)].dot(at.index - half + 1 + shift, t, taps);
             sink.ch[0][offset + k] = v;
             if (sink.ch[1] != nullptr) sink.ch[1][offset + k] = v;
         }
@@ -760,13 +870,21 @@ void MdOneProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     m_ownMask = own;
     m_engine->dryMute = own;
+    // master_fx: the master section's output is the main bus (the other streams delayed to it), or the dry mix as before
+    // the master existed (the master pass is then skipped; its DSP stands until it is switched on again)
+    m_masterMode = m_masterOnParam->get() && m_engine->hasMaster();
+    m_engine->masterBypass = !m_masterMode;
 
     applyParameters();
-    // tempo-synced LFOs and E12 retrigs: the OS keeps BPM x 24 as an integer, so only a change of that reaches it
+    // tempo-synced LFOs and E12 retrigs: the OS keeps BPM x 24 as an integer, so only a change of that reaches it (the
+    // echo's TIME is tempo-relative: a change glides it, as on the MD)
     if (const long word = std::lround(std::clamp(bpm, 30.0, 300.0) * 24.0); word != m_appliedTempo) {
         m_appliedTempo = word;
         m_engine->host().setTempo(bpm);
     }
+    // a kit loaded, a state restored or a new engine: the master section starts at the parameters' settings and the
+    // tempo, without the glide an edit gets
+    if (m_primeMaster.exchange(false)) m_engine->primeMaster();
 
     // Notes -> tracks through the note map, on the MIDI channel set (or any); the editor's on every channel. With an
     // accent amount set, a note at full velocity is an accented trig.
@@ -796,13 +914,16 @@ juce::AudioProcessorEditor* MdOneProcessor::createEditor() { return new OneEdito
 
 // ---- State ----
 //
-// Schema 2 (increment 0004), XML:
-//   <ModuledrumState schema="2" ownBusTracks="(bit t: track t+1 on its own bus)">
-//     <PARAMETERS> <PARAM id="track0_machine" value="16"/> ... every parameter, raw (tempo in BPM) </PARAMETERS>
+// Schema 3 (increment 0009), XML:
+//   <ModuledrumState schema="3" ownBusTracks="(bit t: track t+1 on its own bus)">
+//     <PARAMETERS> <PARAM id="track0_machine" value="16"/> ... every parameter, raw (tempo in BPM, master_fx 0/1) </PARAMETERS>
 //     <KIT name="TRX" bank="MD_presets_1_50" position="0" sysex="F000203C...F7"/>
 //   </ModuledrumState>
 // KIT is parametersToKit() as a kit dump (encodeKit, hex): the loaded kit with the parameters' values, so the kit's other
 // contents survive and the session exports as a kit. The OS file is not part of the state (it is the shared setting).
+// Schema 2 (increment 0004) is the same without the master effects' parameters: a schema 2 state restores the init
+// kit's master bytes (a cleared MD kit's: the session was made without master effects, so it gets the plain ones and not
+// those its kit dump carries, which it never played) and master_fx at its default (on).
 // Schema 1 (0003: midiChannel, tempo, ownBusTracks attributes; firmwarePath, no longer read) restores those settings.
 
 void MdOneProcessor::getStateInformation(juce::MemoryBlock& destData)
@@ -841,7 +962,8 @@ void MdOneProcessor::setStateInformation(const void* data, int sizeInBytes)
     const auto state = juce::ValueTree::fromXml(*xml);
     const int own = state.getProperty("ownBusTracks", 0);
     for (int t = 0; t < kTracks; ++t) setTrackOutput(t, ((own >> t) & 1) != 0);
-    if (int(state.getProperty("schema", 1)) < 2) {   // 0003: the settings only
+    const int schema = state.getProperty("schema", 1);
+    if (schema < 2) {   // 0003: the settings only
         setMidiChannel(state.getProperty("midiChannel", 0));
         setTempo(state.getProperty("tempo", 120.0));
         return;
@@ -877,7 +999,13 @@ void MdOneProcessor::setStateInformation(const void* data, int sizeInBytes)
     setMidiChannel(value(params::kMidiChannelId, 0));
     setAccent(value(params::kAccentId, 0));
     setNoteMap(NoteMap(juce::jlimit(0, 1, int(value(params::kNoteMapId, int(NoteMap::WhiteKeys))))));
-    if (juce::MessageManager::existsAndIsCurrentThread()) handleParameterChanges();
+    // the master effects (schema 3); older states: the init kit's bytes, master_fx on
+    const auto kitMaster = kit.masterFx.bytes();
+    for (int i = 0; i < kMasterParams; ++i)
+        setMasterFx(i, value(params::masterId(i), schema >= 3 ? int(kitMaster[size_t(i)]) : int(kDefaultMaster[size_t(i)])));
+    setRawValue(*m_masterOnParam, bool(value(params::kMasterFxId, true)) ? 1.0f : 0.0f);
+    m_primeMaster.store(true);   // the session starts at its master settings (after the parameters)
+    if (juce::MessageManager::existsAndIsCurrentThread()) { handleParameterChanges(); updateLatency(); }
 }
 
 } // namespace md::plugin::one
