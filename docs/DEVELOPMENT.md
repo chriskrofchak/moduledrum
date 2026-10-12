@@ -72,7 +72,8 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
   `MD_MASTER=1|dry|wet|kit:N` runs the master effects too (a second emulated DSP behind the mixer; N = a kit of
   `$MD_KITS_SYX`) and prints `master hash` next to the dry hash, which does not move.
 - `md-machines <OS>`: the OS machine table (135 machines: id, name, SYN labels).
-- `md-kits list|render`: the kits of a `.syx`, and one kit rendered to a WAV (each track solo, then all).
+- `md-kits list|render`: the kits of a `.syx`, and one kit rendered to a WAV (each track solo, then all); with
+  `--master`, `--ab`, `--pattern`, `--fx` it renders the master effects too (see "Listening pack" below).
 - `md-voicediag`: the voice DSP program as the harness sets it up, disassembled or stepped.
 - `md-plugin-check --check-os-load | --check-render | --check-state | --check-master | --check-editor | --check-rt |
   --snapshot <dir> | --bench 20`: the plugin headless. `--bench` is the CPU figure quoted below (all 16 tracks
@@ -80,6 +81,17 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
   `plugin-rt`) counts every heap allocation in `processBlock` (macOS `malloc_logger` plus a replaced `operator new`) and
   fails on any outside dsp56300's JIT compiles; `MD_RT_ALLOC_TRACE=1` prints the call stacks. `--check-master` (ctest
   `plugin-master`) is the master effects in the plugin (increment 0009).
+
+**Listening pack.** The master section cannot be compared with hardware by automation, so it is judged by ear: A/B renders
+of the owner's own OS and kits, made locally and never committed. `md-kits render --pattern beat <kit> <out.wav>` writes
+the dry mix of a built-in beat (eight bars at 120 BPM: kick on 1 and 3, snare on 2 and 4, hats in eighths, two fills, a
+crash and a kick at the end, then a silent tail); `--master` writes the master output of the same pattern (the kit's 32
+master bytes applied and primed) and `--ab` writes every bar twice, dry and then master, to compare back to back. In a
+pattern render the dry mix is delayed by the master section's own latency (`master::kDryLatency`), so the dry and master
+files line up sample for sample. `--pattern echo-glide|reverb-tail|eq-gain` are the demonstrations (echo TIME and tempo
+changed mid-way, one hit into the gated reverb, EQ GAIN changed mid-way), `--fx INDEX=VALUE` overrides a master byte, and
+each render prints the peak, RMS and tail length of dry and master. The pack is those calls over the 16 preset kits; the
+options are documented in the header of `src/cli/md_kits.cpp`.
 
 ## Established facts and measurements (Apple Silicon, macOS 26, Apple clang 21)
 
