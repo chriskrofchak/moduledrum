@@ -22,6 +22,7 @@
 #include "Lcd.h"
 #include "MachinePicker.h"
 #include "KitBrowser.h"
+#include "SkinDialog.h"
 #include "KitLibrary.h"
 #include "ScaledEditor.h"
 
@@ -291,6 +292,7 @@ public:
     void setStatusShown(bool shown);
     bool statusShown() const { return m_showStatus; }
     void applySkin(const skin::Skin& s);      // makes s the skin of every Moduledrum window (shared settings) and repaints
+    void showSkinDialog() { m_skinDialog.open(); }   // MENU > Skin > Custom... (and UI snapshots)
 
     // LCD geometry (LCD px), as the MPC skin's: the header (the machine block, the kit, the product name, MENU), the 2x2
     // pages with a wide gap between the columns, then the strip, then the footer (the version, the grip); the margin
@@ -326,6 +328,7 @@ private:
     KitsPage m_kits;
     LcdButton m_initKit{"INIT KIT"}, m_export{"EXPORT"}, m_menu{"MENU"};
     MachinePicker m_picker;
+    SkinDialog m_skinDialog;
     juce::Label m_status, m_fwPath;   // the engine status, shown on request (setStatusShown)
     ScaleGrip m_grip;
     std::unique_ptr<juce::FileChooser> m_chooser;

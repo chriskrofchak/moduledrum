@@ -30,7 +30,7 @@ juce_add_plugin(MdOne
   HARDENED_RUNTIME_OPTIONS ${MD_HARDENED_OPTS}
   MICROPHONE_PERMISSION_ENABLED FALSE)
 
-set(MD_ONE_SOURCES one/OneProcessor.cpp one/OneEditor.cpp one/MachinePicker.cpp one/KitBrowser.cpp one/Lcd.cpp one/SpecData.cpp
+set(MD_ONE_SOURCES one/OneProcessor.cpp one/OneEditor.cpp one/MachinePicker.cpp one/KitBrowser.cpp one/SkinDialog.cpp one/Lcd.cpp one/SpecData.cpp
   KitLibrary.cpp MdRomArt.cpp)
 target_sources(MdOne PRIVATE one/OneFactory.cpp ${MD_ONE_SOURCES})
 target_include_directories(MdOne PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

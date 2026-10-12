@@ -1060,6 +1060,14 @@ int snapshot(const juce::File& outDir, const juce::String& os, const juce::Strin
         }
         last = "track";
         shot("status", 1.0, [](OneView& v) { v.setStatusShown(true); });   // MENU > Show Engine Status: the view grows
+        // MENU > Skin: every preset on a track page, then the custom skin dialog (over the default skin again)
+        for (int i = 0; i < md::plugin::skin::kNumPresets; ++i) {
+            const auto preset = md::plugin::skin::Preset(i);
+            if (preset == md::plugin::skin::Preset::Custom) continue;
+            shot("skin-" + juce::String(md::plugin::skin::kPresetNames[i]).toLowerCase().replace(" ", "-"), 1.0,
+                 [preset](OneView& v) { v.selectTrack(4); v.applySkin(md::plugin::skin::presetSkin(preset)); });
+        }
+        shot("skin-dialog", 1.0, [](OneView& v) { v.selectTrack(4); v.applySkin(md::plugin::skin::presetSkin(md::plugin::skin::Preset::Machinedrum)); v.showSkinDialog(); });
     }
     shot(last + "-50", 0.5);
     {   // the size: 50-200 % of the base, aspect ratio locked, and the last size the window was left at is shared

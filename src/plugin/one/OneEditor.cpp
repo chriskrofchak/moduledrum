@@ -693,7 +693,9 @@ OneView::OneView(MdOneProcessor& p) : m_proc(p), m_kits(p, m_library)
         m_proc.handleParameterChanges();   // the SYN parameters take the machine's defaults and names now
         pollMachines();
     };
-    addChildComponent(m_picker);   // last: over the pages
+    addChildComponent(m_picker);   // over the pages
+    m_skinDialog.onChanged = [this] { repaint(); };
+    addChildComponent(m_skinDialog);   // last: over everything
     addMouseListener(this, true);  // to close the picker on a press anywhere else
 
     // MENU (the OS file, the skin, the engine status), the status lines (hidden until asked for), the grip
@@ -791,6 +793,7 @@ void OneView::resized()
         y += kStatusH;
     }
     m_footer = {m_lcd.x, y + kFooterGap * kScale, kLcdContentW * kScale, kFooterH * kScale};
+    m_skinDialog.setBounds(getLocalBounds());
     const int gripPx = ScaleGrip::kDots * kScale;   // the grip takes presses out to the window's corner
     const juce::Point<int> grip(m_footer.getRight() - gripPx, m_footer.getBottom() - gripPx);
     m_grip.setBounds(grip.x, grip.y, getWidth() - grip.x, getHeight() - grip.y);
@@ -1013,14 +1016,15 @@ void OneView::showMenu()
     m.addItem(1, "Select OS File...");
     m.addItem(2, "Clear OS File Selection", m_proc.firmwarePath().isNotEmpty());
     m.addSeparator();
-    {   // the LCD's two colours, shared by every Moduledrum window (Skin.h); the custom pair is set in the settings file
+    {   // the LCD's two colours, shared by every Moduledrum window (Skin.h): the presets, then the custom pair's dialog
         juce::PopupMenu skins;
         const auto cur = skin::current().preset;
         for (int i = 0; i < skin::kNumPresets; ++i) {
             const auto p = skin::Preset(i);
-            if (p == skin::Preset::Custom && cur != p) continue;
-            const auto name = juce::String(skin::kPresetNames[i]).toLowerCase();
-            skins.addItem(10 + i, name.substring(0, 1).toUpperCase() + name.substring(1), p != skin::Preset::Custom, cur == p);
+            juce::String name = juce::String(skin::kPresetNames[i]).toLowerCase();
+            name = name.substring(0, 1).toUpperCase() + name.substring(1);
+            if (p == skin::Preset::Custom) { skins.addSeparator(); name += "..."; }
+            skins.addItem(10 + i, name.replace(" lcd", " LCD"), true, cur == p);
         }
         m.addSubMenu("Skin", skins);
     }
@@ -1033,8 +1037,12 @@ void OneView::showMenu()
         case 2: m_proc.clearFirmware(); timerCallback(); break;
         case 3: setStatusShown(!m_showStatus); break;
         case 4: m_library.folder().revealToUser(); break;
-        case 10: case 11: case 12: applySkin(skin::presetSkin(skin::Preset(r - 10))); break;
-        default: break;
+        default:
+            if (r >= 10 && r < 10 + skin::kNumPresets) {
+                if (skin::Preset(r - 10) == skin::Preset::Custom) showSkinDialog();
+                else applySkin(skin::presetSkin(skin::Preset(r - 10)));
+            }
+            break;
         }
     });
 }
@@ -1063,6 +1071,10 @@ void OneView::timerCallback()
     ++m_tick;
     if (!m_proc.engineReady() && m_tick % 60 == 0)
         m_proc.refreshSharedOsPath();   // another plugin may have configured the OS file meanwhile (every 2 s)
+    if (m_tick % 60 == 30 && !m_skinDialog.isVisible()) {   // another window may have changed the skin (every 2 s)
+        const auto saved = skin::load();
+        if (saved != skin::current()) { skin::apply(saved); repaint(); }
+    }
     if (m_proc.firmwarePath() != m_artPath) {   // OS file chosen or changed: draw with its LCD artwork from now on
         m_artPath = m_proc.firmwarePath();
         if (loadLcdArt(m_artPath)) { resized(); repaint(); }
