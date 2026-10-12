@@ -1084,8 +1084,8 @@ int checkMaster(const juce::String& os, const juce::String& kitsPath)
         std::sort(times.begin(), times.end());
         const bool jit = dsp56k::g_jitSupported;   // the interpreter build compiles nothing
         check((jit ? compiled > 0 && p.masterCompiledBlocks() == compiled : compiled == 0) && first < 5e-3,
-              "the first live callback after the OS load (512 samples, 16 engine blocks): " + juce::String(first * 1e6, 0) + " us (median of the next 64: "
-              + juce::String(times[times.size() / 2] * 1e6, 0) + " us); " + (jit ? "the master DSP's " + juce::String(compiled)
+              "the first live callback after the OS load (512 samples, 16 engine blocks): " + juce::String(juce::roundToInt(first * 1e6)) + " us (median of the next 64: "
+              + juce::String(juce::roundToInt(times[times.size() / 2] * 1e6)) + " us); " + (jit ? "the master DSP's " + juce::String(compiled)
               + " compiled JIT blocks unchanged (" + juce::String(p.masterCompiledBlocks()) + "): its warm-up compiled them" : juce::String("interpreter: no JIT")));
         p.setMasterOn(false);
         check(!p.masterActive() && p.getLatencySamples() == 0 && p.getTailLengthSeconds() == 0.0, "master_fx off: latency 0, tail 0");
@@ -1238,6 +1238,27 @@ int checkMaster(const juce::String& os, const juce::String& kitsPath)
         }
         check(ok && sound && p.engineReady() && !p.statusText().contains("FAULT"),
               "master_fx switched 7 times while playing: the reported latency follows (" + lags.joinIntoString(" ") + "), no fault: " + p.statusText());
+
+        // A kit load primes the master on the audio thread (HostModel::primeMasterFx runs the OS's slew to its fixed
+        // point): the callback after it, against the ones before (256 samples: a 5.8 ms budget)
+        std::vector<double> before;
+        for (int b = 0; b < 32; ++b) {
+            const auto t0 = std::chrono::steady_clock::now();
+            p.processBlock(buf, midi);
+            before.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::sort(before.begin(), before.end());
+        double primed = 0.0;
+        for (int k = 0; k < 4; ++k) {   // the default kit, then the test kit's master bytes moved far, each primed once
+            if (k % 2 == 0) p.loadDefaultKit();
+            else { md::library::Kit kit = p.parametersToKit(); kit.masterFx.delay = {127, 127, 127, 127, 127, 0, 127, 127}; p.loadKit(kit); }
+            midi.clear();
+            const auto t0 = std::chrono::steady_clock::now();
+            p.processBlock(buf, midi);
+            primed = std::max(primed, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+        check(primed < 256.0 / 44100.0 && p.engineReady(), "a kit load primes the master in the next callback: at most " + juce::String(juce::roundToInt(primed * 1e6))
+              + " us over 4 loads (256 samples, budget 5805 us; the median callback before them " + juce::String(juce::roundToInt(before[before.size() / 2] * 1e6)) + " us)");
     }
 
     // Kit 0 with the master on: the engine's master output at the kit's settings, the other buses lined up with it
