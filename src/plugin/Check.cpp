@@ -1082,9 +1082,8 @@ int checkMaster(const juce::String& os, const juce::String& kitsPath)
         std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n");
         return 77;
     }
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-master");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("master");
+    const auto& settingsDir = scratch.dir;
     md::plugin::saveSharedOsPath(os);
     using NoteMap = MdOneProcessor::NoteMap;
     constexpr int kLatency = MdOneProcessor::kMasterLatency;
