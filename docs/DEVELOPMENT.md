@@ -185,9 +185,10 @@ test command. OS 1.63:
   delete each other's OS-file setting; `render` then reports "no engine: No Machinedrum OS file selected" and
   `checkRender` goes on to read the first channel of an empty result (null dereference; lldb on the native build
   stopped in `checkRender`). Eight parallel loops with each its own copy of the executable (so its own folder): 48 of 48
-  pass. A user's real settings are never touched (`MD_SETTINGS_DIR`). To do, in `src/plugin/Check.cpp`: give each
-  run a folder of its own (the process id in the name) and fail the check instead of reading an empty render. Until
-  then, run one `ctest` at a time on a Mac (two worktrees count).
+  pass. A user's real settings are never touched (`MD_SETTINGS_DIR`). Fixed in increment 0020: every check run keeps
+  its settings in a folder of its own (`mkdtemp` in that temp directory, removed when the check returns), and a check
+  without an engine fails with a message and exit code 1 instead of reading an empty render. The same 8 parallel
+  loops now pass 24 of 24 for `--check-render` and for `--check-state` (`tests/stress_checks.sh`).
 - **Caution.** Attaching lldb to the x86_64 slice hung (0 % CPU, debugserver under Rosetta); after it was killed
   Rosetta stopped starting binaries it had not seen before (a freshly compiled hello world too: processes stuck in
   the kernel at exec, state U, which `kill -9` does not end). It cleared by itself after about 40 minutes; whether the
@@ -261,9 +262,8 @@ verification of their claims.
   /Library/Audio/Plug-Ins, the app to /Applications) and a `.zip` of the three bundles; `-n` notarizes and staples
   (needs the owner's Developer ID certificates and a `notarytool` keychain profile, untested here);
   `.github/workflows/build.yml` builds and tests on an Apple Silicon runner and uploads the bundles; the README has
-  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the checks' shared temp
-  folders (increment 0020), an Intel-hardware run before the default release becomes universal, loading the packaged
-  build in a DAW, and the owner's certificates.
+  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: an Intel-hardware run before
+  the default release becomes universal, loading the packaged build in a DAW, and the owner's certificates.
 - **0009 Master effects.** The Machinedrum's master section (rhythm echo, gate box/reverb, master EQ, dynamix) runs on
   the mixer DSP (DSP1). **Steps 1-3 (engine) are done**: DSP1's own master pass runs on a second emulated DSP behind the
   mixer, parameterised by the OS's own code (see "Master effects, engine side" above; the increment holds the research, the

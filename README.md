@@ -228,8 +228,7 @@ Without the OS file, the tests that run the engine are reported as skipped and t
 the plugin's parameters and saved state, and the editor's kit browser. `plugin-editor` drives the editor headlessly;
 `plugin-rt` checks that `processBlock` makes no heap allocation (macOS);
 `md-plugin-check --snapshot <dir>` renders its pages to PNG for review (they show artwork read from your OS file, so
-don't commit them). Run one `ctest` at a time: the plugin checks keep their settings in a folder named after the check,
-so two runs at once (also from two build directories or two worktrees) delete each other's and fail or crash.
+don't commit them).
 
 The golden test checks that `md-hash`'s pattern still renders bit for bit what it did: `build/src/cli/md-hash <OS.syx>`
 prints `hash 04ef1db4fe767721` with OS 1.63, with the JIT and with the interpreter, and `MD_GROUPS=2` must print the same.

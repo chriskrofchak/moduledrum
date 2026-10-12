@@ -71,6 +71,7 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#include <unistd.h>   // mkdtemp
 #include "golden/GoldenPattern.h"
 #include "md/library/KitApply.h"
 #include "md/library/MdSysex.h"
@@ -93,6 +94,37 @@ void check(bool ok, const juce::String& what)
     if (!ok) ++g_failures;
 }
 
+// Ends the running check at once with a failure (main turns it into exit code 1), for a failure the rest of the check could only
+// answer by reading what is not there (a render without an engine). Unwinding runs the destructors, so the settings folder goes.
+struct CheckAbort {};
+
+[[noreturn]] void abortCheck(const juce::String& what)
+{
+    check(false, what);
+    throw CheckAbort{};
+}
+
+// A check's own settings folder, which MD_SETTINGS_DIR names for the processors: new for every run (mkdtemp under the temp
+// directory, ~/Library/Caches/<executable name> on macOS), so two runs at once (two worktrees' ctest, a parallel loop) never
+// share one or delete each other's OS-file setting, and removed again when the check returns, whichever way it does. The
+// caller's own MD_SETTINGS_DIR is replaced: the checks never touch the user's real settings.
+struct ScopedSettingsDir {
+    juce::File dir;
+
+    explicit ScopedSettingsDir(const char* name)
+    {
+        const auto root = juce::File::getSpecialLocation(juce::File::tempDirectory);
+        root.createDirectory();
+        auto path = (root.getFullPathName() + "/md-plugin-check-" + name + "-XXXXXX").toStdString();
+        if (!mkdtemp(path.data())) abortCheck("no settings folder in " + root.getFullPathName());
+        dir = juce::File(juce::String(path));
+        setenv("MD_SETTINGS_DIR", dir.getFullPathName().toRawUTF8(), 1);
+    }
+    ~ScopedSettingsDir() { dir.deleteRecursively(); }
+    ScopedSettingsDir(const ScopedSettingsDir&) = delete;
+    ScopedSettingsDir& operator=(const ScopedSettingsDir&) = delete;
+};
+
 // Runs n host blocks; true when every output sample was 0
 bool runSilent(MdOneProcessor& p, double rate, int blockSize, int n)
 {
@@ -113,15 +145,14 @@ bool runSilent(MdOneProcessor& p, double rate, int blockSize, int n)
 
 int checkOsLoad(const juce::String& os)
 {
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-settings");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("settings");
+    const auto& settingsDir = scratch.dir;
 
     MdOneProcessor p;
     check(!p.engineReady() && p.statusText().startsWith("No Machinedrum OS file selected"), "fresh start is unconfigured: " + p.statusText());
     check(runSilent(p, 44100.0, 512, 4) && p.engineBlocks() == 0, "processBlock without an engine outputs silence");
 
-    const auto wrong = settingsDir.getSiblingFile("md-plugin-check-not-an-os.syx");
+    const auto wrong = settingsDir.getChildFile("not-an-os.syx");
     wrong.replaceWithText("not a Machinedrum OS file\n");
     p.setFirmwarePath(wrong.getFullPathName());
     check(!p.engineReady() && p.statusText().startsWith("OS file load failed"), "a wrong file reports an error: " + p.statusText());
@@ -256,7 +287,7 @@ Render render(const std::vector<Note>& notes, int64_t frames, const RenderOption
 {
     Render r;
     MdOneProcessor p;
-    if (!p.engineReady()) { check(false, "render: no engine: " + p.statusText()); return r; }
+    if (!p.engineReady()) abortCheck("render: no engine: " + p.statusText());
     if (o.testKit) setupTestKit(p);
     if (o.setup) o.setup(p);
     if (o.midiChannel) p.setMidiChannel(*o.midiChannel);
@@ -266,7 +297,7 @@ Render render(const std::vector<Note>& notes, int64_t frames, const RenderOption
         auto layout = p.getBusesLayout();
         for (int b = 1; b < MdOneProcessor::kNumBuses; ++b)
             layout.outputBuses.getReference(b) = b < MdOneProcessor::kReverbBus ? juce::AudioChannelSet::mono() : juce::AudioChannelSet::stereo();
-        if (!p.setBusesLayout(layout)) { check(false, "render: every bus on is a supported layout"); return r; }
+        if (!p.setBusesLayout(layout)) abortCheck("render: every bus on is a supported layout");
     }
     p.setRateAndBufferSizeDetails(o.rate, o.block);
     p.prepareToPlay(o.rate, o.block);
@@ -359,9 +390,8 @@ int checkRender(const juce::String& os)
         std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n");
         return 77;
     }
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-render");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("render");
+    const auto& settingsDir = scratch.dir;
     md::plugin::saveSharedOsPath(os);   // every processor below loads it
     const auto seq = testSequence();
     const double seconds = double(kSequenceFrames) / 44100.0;
@@ -626,9 +656,8 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
         std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n");
         return 77;
     }
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-state");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("state");
+    const auto& settingsDir = scratch.dir;
     md::plugin::saveSharedOsPath(os);
     using NoteMap = MdOneProcessor::NoteMap;
 
@@ -907,9 +936,8 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
 int bench(const juce::String& os, double seconds)
 {
     if (os.isEmpty() || !juce::File(os).existsAsFile()) { std::printf("bench needs the OS file\n"); return 77; }
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-bench");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("bench");
+    const auto& settingsDir = scratch.dir;
     md::plugin::saveSharedOsPath(os);
     constexpr int kStepBlocks = 86;
     const auto frames = int64_t(seconds * 44100.0);
@@ -1008,9 +1036,8 @@ int checkRt(const juce::String& os)
     if (os.isEmpty() || !juce::File(os).existsAsFile()) { std::printf("[SKIP] no Machinedrum OS file (set MD_OS_SYX or -DMD_OS_SYX=..., or pass --fw)\n"); return 77; }
     if (!AllocCounter::mallocHooked()) { std::printf("[SKIP] counting allocations needs macOS's malloc_logger (to tell the JIT's apart)\n"); return 77; }
     check(AllocCounter::selfTest(), "the allocation counter sees operator new and malloc");
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-rt");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("rt");
+    const auto& settingsDir = scratch.dir;
     md::plugin::saveSharedOsPath(os);
     const bool trace = std::getenv("MD_RT_ALLOC_TRACE") != nullptr;
 
@@ -1126,9 +1153,8 @@ void setLfoExample(MdOneProcessor& p, int track)
 
 int snapshot(const juce::File& outDir, const juce::String& os, const juce::String& kitsPath)
 {
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-snapshot");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("snapshot");
+    const auto& settingsDir = scratch.dir;
     outDir.createDirectory();
     MdOneProcessor p;
     using md::plugin::scale::ScaledEditor;
@@ -1255,9 +1281,8 @@ struct GestureCounter final : juce::AudioProcessorListener {
 
 int checkEditor(const juce::String& os, const juce::String& kitsPath)
 {
-    const auto settingsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("md-plugin-check-editor");
-    settingsDir.deleteRecursively();
-    setenv("MD_SETTINGS_DIR", settingsDir.getFullPathName().toRawUTF8(), 1);
+    const ScopedSettingsDir scratch("editor");
+    const auto& settingsDir = scratch.dir;
     const auto kitFolder = md::plugin::sharedKitFolder();
     const auto renders = [](juce::AudioProcessorEditor& e) {
         const auto image = e.createComponentSnapshot(e.getLocalBounds(), true, 1.0f);
@@ -1571,7 +1596,9 @@ int checkEditor(const juce::String& os, const juce::String& kitsPath)
 
 } // namespace
 
+// A function-try-block: a check's abortCheck() (no engine and the like) ends here, in exit code 1, after the unwinding
 int main(int argc, char** argv)
+try
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
     juce::String mode, os, outDir, kits;
@@ -1601,4 +1628,9 @@ int main(int argc, char** argv)
                          "       md-plugin-check --check-rt [--fw os.syx]\n"
                          "       md-plugin-check --snapshot <dir> [--fw os.syx] [--kits kits.syx]\n");
     return 2;
+}
+catch (const CheckAbort&)
+{
+    std::printf("md-plugin-check: the check was aborted\n");
+    return 1;
 }
