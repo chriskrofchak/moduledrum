@@ -1,11 +1,11 @@
 ---
 id: 19
-status: in_progress
+status: done
 tags:
 - plugin
 - au
 created_at: 2026-10-12T20:36:38Z
-updated_at: 2026-10-12T21:43:54Z
+updated_at: 2026-10-12T22:29:00Z
 ---
 ## Why
 `auval -oop -v aumu Mdo1 Mdrm` (out of process) passes everything except "Parameter values are different since last

@@ -1,11 +1,11 @@
 ---
 id: 9
-status: in_progress
+status: done
 tags:
 - engine
 - stretch
 created_at: 2026-10-12T15:04:48Z
-updated_at: 2026-10-12T19:33:29Z
+updated_at: 2026-10-12T22:29:00Z
 ---
 ## Why
 The Machinedrum's output passes through a stereo master section on its mixer DSP (DSP1): rhythm echo (delay), gate box
