@@ -54,6 +54,8 @@ Every engine or plugin change must keep these; they are what "bit-exact" means h
 | The plugin's regression render, chromatic note map | `a28b9dc178776939` | ctest `plugin-render` |
 | The same render, the hardware's white-key note map | `14291ff9302212d4` | ctest `plugin-render` |
 | JIT = interpreter | all of the above identical with `-DMD_USE_JIT=OFF`; `MD_SWEEP=1 md-hash` identical per machine | ctest `jit`, `MD_JIT_LOCKSTEP=1` |
+| The master effects' output of the golden pattern (`MD_MASTER=dry\|wet`, fixed synthetic master bytes in `GoldenPattern.h`) | dry-ish `fe784d9f02fa30b2`, wet `9b8a53ca6fae15fe`; the cleared kit's bytes (`MD_MASTER=1`) `3c37e206683bf50e`; with the master bytes of preset kits 0 (TRX), 1 (EFM), 9 (BOOGIE), 13 (ALIENS): `5f4b45659f477ab7`, `1222389a11b38fe6`, `2abcba9c5e9bf547`, `b892b2c5f5a1e43b`. The dry hash above is unchanged next to them, and all of them are identical on the JIT and the interpreter | ctest `golden-master`, `md-hash` with `MD_MASTER=` |
+| Master section against its references | JIT = interpreter on 3200 random blocks (0 of 16.7 M words differ); master-only = DSP1's whole main loop (`tests/Dsp1Reference`) on 3 kits x 4000 blocks (0 of 2.9 M); the OS's 38 parameter words (test vector, the 16 preset kits' checksum `3f50575c608c9c35`); a live block takes < 25 us and allocates nothing; a booted DSP stays under 200 MB | ctest `master`, `master-host`, `master-ram` |
 
 ```bash
 MD_OS_SYX=/path/to/Elektron_SPS1-1UW_OS1.63.syx MD_KITS_SYX=/path/to/MD_presets_1_50.syx \
@@ -65,6 +67,8 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
 - `md-hash <OS> [ROM_SAMPLES.bin]`: the golden pattern's hash. `MD_SWEEP=1` plays every machine and prints its peak
   (the release gate: none of the playable ones silent); `MD_TIMING=1` prints the render's stages; `MD_JIT_LOCKSTEP=1`
   (JIT builds) runs an interpreter shadow of each voice DSP and stops at the first register that differs.
+  `MD_MASTER=1|dry|wet|kit:N` runs the master effects too (a second emulated DSP behind the mixer; N = a kit of
+  `$MD_KITS_SYX`) and prints `master hash` next to the dry hash, which does not move.
 - `md-machines <OS>`: the OS machine table (135 machines: id, name, SYN labels).
 - `md-kits list|render`: the kits of a `.syx`, and one kit rendered to a WAV (each track solo, then all).
 - `md-voicediag`: the voice DSP program as the harness sets it up, disassembled or stepped.
@@ -83,8 +87,32 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
 - **CPU:** `md-hash`'s 12 s of 16-track audio renders in 0.6 s on the JIT (2.2 s on the interpreter). The plugin bench:
   **7.2 / 7.5 / 7.7 % of one core at 44.1 / 48 / 96 kHz** with all 16 tracks hammered, worst callback ~260 µs against
   a 1451 µs budget (interpreter: ~33 %). An idle instance still runs the whole DSP every block (open work 0013).
-- **Memory:** about 420-500 MB per instance (the emulator's memory and the interpreter's opcode cache). The MPC port
-  trimmed this ("about 225 MB less RAM", its HANDOFF); not done here yet.
+- **Memory:** a booted emulated DSP takes about 90 MB (JIT; ~110 MB on the interpreter, whose opcode cache is 100 MB of
+  it), measured as `task_info` `phys_footprint`: a plain engine 87 MB, with the master effects (a second DSP) 303 MB. It was
+  358 MB per DSP (the 420-500 MB per instance quoted before; the MPC port trimmed some of it) until two defaults of the
+  emulator were removed (increment 0009): `MmuHelper::mapRegion` `mlock()`ed every alias of the DSP's address space, 192 MB of
+  wired pages for ~40 MB of backing store (`ext/patches/0002-dsp56300-md-memory.patch`, applied at configure time by
+  `src/core/CMakeLists.txt` beside 0001), and the ESSI ports' audio ring buffers, 80 MB per DSP that nothing here uses
+  (`DSP56300_AUDIO_RINGBUFFER_SIZE=64`, the emulator's own switch, defined PUBLIC on `dsp56kEmu`). ctest `master-ram`
+  guards it. What is left is mostly the JIT's block chains: one per DSP mode (the combination of addressing modes the
+  program has set in the AGU registers), each an array of 8 bytes per P address up to the highest P word written, 10.6 MB for
+  the master program, which goes through 17 modes in one pass (~130 MB of the engine-with-master's 303). The dispatch
+  (`DSP::execJit`) indexes that array unchecked, so shrinking it needs a bounds check in the JIT's hot path: not done.
+- **Master effects, engine side (increment 0009):** the rhythm echo, gate box reverb, master EQ and dynamix are the mixer
+  DSP's (DSP1) own program, master section only (P:$342-$9a7, 1255 instructions, 10 295 per 32-sample block), unchanged,
+  on a second emulated DSP (`MasterFx`) behind the native `TrackFx` and `Mixer`. A harness parks DSP1's boot loop behind
+  a stub and starts each block at $342; no word of the master code is patched. The 32 kit bytes (`HostModel::setMasterFx`) go
+  through the OS's own smoothing and parameter code (the tail of its tick routine, $20b4a2-$20ba4c, one of four groups
+  per tick, run by `MachineRunner::callUntil`) into the 38 words at Y:$150-$18c, so the hardware's cadence and quirks
+  stay (a smoothed value ends 3 below a target it approaches from below; a TIME or tempo change glides the echo).
+  `EngineT` owns the optional `MasterFx` (on by default when the OS has the section; `EngineOptions{false}` to leave it
+  out), its output is `Engine::Output::master`, and the dry outputs, their hashes and the plugin's are untouched: it is an
+  extra stage after the mixer. Checked: JIT = interpreter, and master-only = DSP1's whole main loop, word for word (table
+  above). Cost: **11.8 us a block** on the JIT (`md-hash`: 590 -> 800 ms per 12 s of audio, 4.9 -> 6.7 % of real time;
+  143 us on the interpreter), ~90 MB, 55 ms to build (6 ms boot, then a warm-up that compiles every JIT block (672 entry points) over
+  synthetic signals and puts DSP memory back, so that a live block compiles and allocates nothing). The pass is not
+  level-neutral against the dry bus (dry goes through EQ, dynamix and GAIN too; the cleared kit is about -2.6 dB) and the
+  dry path comes out `master::kDryLatency` = 18 frames late. The plugin and editor side is still to do (increment 0009).
 - **Latency:** 0 samples at 44.1 kHz, 40 at 48 kHz, 79 at 96 kHz (the resampler), reported to the host.
 - **No heap allocation on the audio thread** (increment 0014, ctest `plugin-rt`), JUCE's MIDI handling included, except
   dsp56300's JIT compiling a voice-program block the first time the program reaches it (~500 blocks, ~5900 mallocs,
@@ -144,8 +172,10 @@ on Intel before a universal build.
   The loaded `md::library::Kit` is the canonical in-memory form.
 - **Kits:** `src/core/md/library` decodes and re-encodes `$52` kit messages byte for byte (all 64 of the preset file
   round-trip). Routing is not in a kit (it is in the `$50` global dump); free slots are kits whose first name byte is
-  `$7f`. Master-effect blocks are decoded and kept raw (their parameter order is unverified until the master effects
-  exist). Kits live in `~/Library/Application Support/Moduledrum/Machinedrum/kits/`, one bank per file.
+  `$7f`. The master-effect blocks are four blocks of 8 bytes in the OS's own order (reverb, echo, EQ, dynamix; the names in
+  `MdSysex.h` are confirmed by what the OS does with each byte, increment 0009); the engine runs them
+  (`Kit::masterFx.bytes()` into `HostModel::setMasterFx`, which `applyKit` does not do yet). Kits live in
+  `~/Library/Application Support/Moduledrum/Machinedrum/kits/`, one bank per file.
 - **Editor:** everything inside the LCD is drawn on a 1-bit canvas with the OS file's own fonts and dials (nothing
   firmware-derived is committed; a built-in stand-in face is used without an OS). Layout: SYN | AMP/EFX over ROUTE |
   LFO per track, a 16-track strip, a GLOBAL tab (mixer, settings, kit browser). The artwork reader trusts the OS 1.63
@@ -180,9 +210,12 @@ verification of their claims.
   Packaging must run `codesign --options runtime --entitlements` (the JIT needs the JIT entitlements), make a
   universal binary (and check the x64 JIT first), and an installer. `auval -v aumu Mdo1 Mdrm` passes today.
 - **0009 Master effects.** The Machinedrum's master section (rhythm echo, gate box/reverb, master EQ, dynamix) runs on
-  the mixer DSP (DSP1) and is not emulated; the reverb and delay sends come out as their own buses instead. Options:
-  run DSP1's own program in a second emulated DSP, or translate it to C++ as the per-track chain was. The MPC port's
-  HANDOFF and `docs/PROTOCOL.md` describe DSP1.
+  the mixer DSP (DSP1). **Steps 1-3 (engine) are done**: DSP1's own master pass runs on a second emulated DSP behind the
+  mixer, parameterised by the OS's own code (see "Master effects, engine side" above; the increment holds the research, the
+  design and the verification output). **Steps 4-6 remain**: the plugin and the editor. Kit master bytes into the
+  host parameters (32 integers 0-127, state schema 3), `master_fx` on/off, the master output replacing the main bus
+  (18 frames of alignment for the other streams, latency and tail), and four MASTER `KnobPage`s. Until then the plugin
+  still puts the reverb and delay sends on their own buses and ignores a kit's master blocks.
 - **0006 ROM machines and factory kits** need a flash image from a real Machinedrum UW; the MPC port's `tools/mdkits`
   shows how to extract the sample memory and the 16 factory kits by booting the emulated machine.
 - Not modelled at all: the sequencer (patterns, songs, parameter locks, trigger groups), audio input (INP machines),

@@ -95,17 +95,18 @@ namespace md::engine
 		bool process(const Mixer::Output& _in, Stereo& _out);
 
 		// Compile the program ahead of the first live block: runs _sets word sets (master::kWords each) over a fixed
-		// synthetic signal (noise at several levels, full-scale squares, impulses and silence on the three buses; 96 blocks
-		// per set), long enough to take the data-dependent paths (echo glide up and down, gate open and closed, dynamix
-		// above and below its threshold ...) so that dsp56300's JIT has compiled every block, then puts DSP1's memory back
+		// synthetic signal (noise rising or falling through every level, steady noise, squares, impulses and silence, a kind per
+		// bus and set; 140 blocks per set), long enough to take the data-dependent paths (echo glide up and down, gate open
+		// and closed, dynamix above and below its threshold and in its knee ...) so that dsp56300's JIT has compiled every
+		// block, then puts DSP1's memory back
 		// as it was (the instance is as a fresh one: no words, empty echo and reverb) and keeps the compiled code. Without
 		// this the JIT compiles a block (~100 us to 14 ms) the first time the program reaches it, on whatever thread
 		// renders. Off the audio thread: a few ms per set and a 10 MB scratch copy of DSP memory. The word sets should
 		// cover the extremes of the parameters (HostModel::computeMasterWords makes valid ones from kit bytes).
 		void warmUp(const uint32_t* _wordSets, int _sets);
 
-		// Blocks of the program the JIT has compiled so far (0 for the interpreter): a live block that compiles one is the
-		// stall warmUp() is there to avoid
+		// Entry points of the JIT blocks compiled in the program's address range so far (0 for the interpreter): a live block
+		// that adds one is the stall warmUp() is there to avoid
 		size_t compiledBlocks() const;
 
 		// Y memory of DSP1, for tests and tools (the whole master state lives in Y:$000-$1ff and the X rings)

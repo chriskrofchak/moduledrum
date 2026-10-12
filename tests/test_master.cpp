@@ -741,6 +741,32 @@ TEST_CASE(gmaster_disabled_is_silent)
     CHECK_MSG(masterHash == p.masterHash(), "the master output was not silent");
 }
 
+// masterBypass: the pass is not run and the output is silent, the dry mix is the same, and switching back on carries on
+TEST_CASE(gmaster_bypass)
+{
+    Engine eng(os().firmware, os().image);
+    for (int i = 0; i < master::kParams; ++i) eng.host().setMasterFx(i, golden::kMasterWet[size_t(i)]);
+    eng.primeMaster();
+    golden::Pattern p;
+    p.setup(eng.host());
+    Engine::Output out;
+    auto energy = [](const Mixer::Stereo& s) { int64_t e = 0; for (const auto& f : s) for (int32_t v : f) e += std::abs(int64_t(v)); return e; };
+    int64_t on = 0, off = 0, back = 0;
+    uint64_t blocksRun = 0;
+    for (int b = 0; b < 3000; ++b) {
+        eng.masterBypass = b >= 1000 && b < 2000;
+        p.beforeBlock(eng.host(), b);
+        CHECK(eng.render(out));
+        if (b == 999) blocksRun = eng.master()->blocks();
+        (b < 1000 ? on : b < 2000 ? off : back) += energy(out.master);
+    }
+    CHECK(on > 0);
+    CHECK_EQ(off, int64_t(0));
+    CHECK(back > 0);
+    CHECK_EQ(eng.master()->blocks(), blocksRun + 1000);	// 1000 blocks bypassed
+    CHECK_EQ(eng.fault(), std::string());
+}
+
 // ParallelEngine carries the master too, on the same words: the same master hash as the single voice DSP
 TEST_CASE(gmaster_parallel_engine)
 {

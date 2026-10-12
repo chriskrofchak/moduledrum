@@ -102,6 +102,9 @@ namespace md::engine
 		// Optional stage timing (microseconds, accumulated): track effects, and the mix. The OS tick and the voice DSP
 		// are HostModel's (host().tickUs / dspUs).
 		uint32_t dryMute = 0;	// tracks kept out of the dry main mix (see Mixer::process); set by the caller between renders
+		// true: the master pass is not run (12 us a block saved) and Output::master is silent. The DSP stands where it was and
+		// the host's words keep reaching it, so switching back on continues from the old echo and reverb contents, no glide.
+		bool masterBypass = false;
 		bool timingOn = false;
 		double fxUs = 0, mixUs = 0, masterUs = 0;
 
@@ -186,6 +189,11 @@ namespace md::engine
 			if(!m_master)
 				return true;
 			flushMasterWords();
+			if(masterBypass)
+			{
+				_out.master = {};
+				return true;
+			}
 			return m_master->process(_out.mix, _out.master);
 		}
 
