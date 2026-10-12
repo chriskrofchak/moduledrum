@@ -93,6 +93,11 @@ public:
                                       .withValueFromStringFunction([&p](const juce::String& s) { return p.machineFromText(s); })),
           m_p(p), m_track(track) {}
 
+    // A machine change rewrites SYN1-8 (the machine's defaults): hosts must know that setting it changes other parameters
+    // (AU: kAudioUnitParameterFlag_IsGlobalMeta, without which auval -oop fails "Parameter values are different since last
+    // set"; .clew increment 0019). It is the only parameter that rewrites others.
+    bool isMetaParameter() const override { return true; }
+
 private:
     void valueChanged(int v) override { m_p.machineChanged(m_track, v); }
     MdOneProcessor& m_p;

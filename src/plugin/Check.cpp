@@ -20,11 +20,12 @@
 //       Pass/fail, parameters and state (.clew increment 0004): the parameter layout (ids, groups, names, ranges,
 //       defaults, getName's cost); a machine change as a host makes it (the engine plays the machine's SYN defaults at
 //       once, the SYN parameters follow and are renamed on the message thread, the host is told, SYN values set since are
-//       kept); an edited session saved and restored (every parameter, the same state bytes, the same sound); a schema 1
-//       state. With a kit snapshot (--kits, else $MD_KITS_SYX): every kit loaded and exported is the same dump byte for
-//       byte; kit 0 played through the processor gives kKit0ProcessorHashOs163, the same as md::library::applyKit on the
-//       engine with the processor's warm-up (and tests/test_kits.cpp's kKit0Hash without it), and again after its state
-//       is restored into a fresh processor. Exit code 77 (skipped) without an OS file.
+//       kept; the machine parameters are meta parameters); an edited session saved and restored (every parameter, the
+//       same state bytes, the same sound); a schema 1 state. With a kit snapshot (--kits, else $MD_KITS_SYX): every kit
+//       loaded and exported is the same dump byte for byte; kit 0 played through the processor gives
+//       kKit0ProcessorHashOs163, the same as md::library::applyKit on the engine with the processor's warm-up (and
+//       tests/test_kits.cpp's kKit0Hash without it), and again after its state is restored into a fresh processor. Exit
+//       code 77 (skipped) without an OS file.
 //
 //   md-plugin-check --bench [seconds] [--fw os.syx]
 //       CPU use with all 16 tracks triggered 8 times per beat at 120 BPM: the processor at a 64-sample host buffer at
@@ -672,6 +673,9 @@ int checkState(const juce::String& os, const juce::String& kitsPath)
             groupsOk = groups[g]->getName() == (g < 16 ? "T" + juce::String(g + 1) : juce::String("Global"))
                     && groups[g]->getParameters(false).size() == (g < 16 ? params::kTrackParams : params::kGlobals);
         check(groupsOk, "groups T1..T16 (31 each) and Global (4)");
+        bool meta = true;
+        for (int i = 0; i < ps.size(); ++i) meta = meta && ps[i]->isMetaParameter() == (i < params::kTracks * params::kTrackParams && i % params::kTrackParams == params::kMachine);
+        check(meta, "the 16 machine parameters, which rewrite SYN1-8, are meta parameters (AU: IsGlobalMeta), no other one is");
         const auto raw = [](const juce::RangedAudioParameter& q) { return juce::roundToInt(q.convertFrom0to1(q.getDefaultValue())); };
         check(raw(p.parameter(3, params::kKit + 10)) == 64 && raw(p.parameter(3, params::kKit + 13)) == 127 && raw(p.parameter(3, params::kKit + 17)) == 100
               && raw(p.parameter(3, params::kKit + 18)) == 64 && raw(p.parameter(3, params::kLevel)) == 100 && raw(p.parameter(3, params::kLfo)) == 3
