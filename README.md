@@ -16,7 +16,8 @@ Motorola DSP56300 and the OS's own machine code in an emulated ColdFire, on the 
 > yourself (see [Getting the OS file](#getting-the-os-file)).
 
 **Status:** early development. It plays, it saves, and the editor is complete, but the master effects and the ROM
-machines are still missing (see [Known limitations](#known-limitations)) and there is no packaged release yet.
+machines are still missing (see [Known limitations](#known-limitations)). There is an installer and a CI build now, but no
+download is published yet.
 
 ## What's included
 
@@ -70,8 +71,40 @@ Moduledrum reads it each time it starts and never copies it or redistributes it.
 
 ## Installing a release
 
-There are no pre-built downloads yet (a universal macOS build and an installer are planned). Build it from source
-below; the build installs the AU and VST3 plugins for you.
+`release/build_release.sh` (see [Making a release](#making-a-release)) makes the two downloads of a release. Both hold
+the same three bundles:
+
+- **`Moduledrum-<version>-macos-arm64.pkg`**, the installer. Open it, click through, and use *Customize* to leave out
+  what you don't want. It installs for all users:
+
+  | | Installed to |
+  |---|---|
+  | Audio Unit | `/Library/Audio/Plug-Ins/Components/Moduledrum.component` |
+  | VST3 | `/Library/Audio/Plug-Ins/VST3/Moduledrum.vst3` |
+  | Standalone app | `/Applications/Moduledrum.app` |
+
+- **`Moduledrum-<version>-macos-arm64.zip`**, the bundles on their own, in `AU/`, `VST3/` and `Standalone/`, with the
+  licence files. Copy them by hand: to `~/Library/Audio/Plug-Ins/Components` and `~/Library/Audio/Plug-Ins/VST3` for
+  yourself only (the folders may not exist yet), or to the same folders under `/Library/` for everyone.
+
+Then rescan the plugins in your host (Logic scans Audio Units at launch) and
+[select your OS file](#getting-the-os-file) the first time Moduledrum opens. Nothing of Elektron's is in either file.
+
+**Apple Silicon only so far.** A universal build with an Intel (x86_64) slice can be made (see
+[Building](#universal-binary-and-intel)), but dsp56300's x64 JIT is not yet trusted, see
+[Known limitations](#known-limitations).
+
+**Gatekeeper.** A release that is signed with a Developer ID certificate and notarized opens without questions. One
+that is not (a build you made yourself, or a release published ad-hoc signed) is blocked while it carries the
+download's quarantine mark: right-click the `.pkg` or the app and choose *Open*, then *Open* again; or allow it under
+*System Settings > Privacy & Security > Open Anyway*; or remove the mark yourself, for the installer, or for the
+unzipped bundles or the installed ones:
+
+```bash
+xattr -d com.apple.quarantine Moduledrum-<version>-macos-arm64.pkg
+xattr -dr com.apple.quarantine /Applications/Moduledrum.app \
+  /Library/Audio/Plug-Ins/Components/Moduledrum.component /Library/Audio/Plug-Ins/VST3/Moduledrum.vst3
+```
 
 ## Building from source
 
@@ -95,7 +128,7 @@ What you get:
 | | |
 |---|---|
 | `build/src/plugin/MdOne_artefacts/Release/Standalone/Moduledrum.app` | standalone app |
-| `build/src/plugin/MdOne_artefacts/Release/AU/Moduledrum.component`, `.../VST3/Moduledrum.vst3` | plugins, also copied to `~/Library/Audio/Plug-Ins/` |
+| `build/src/plugin/MdOne_artefacts/Release/AU/Moduledrum.component`, `.../VST3/Moduledrum.vst3` | plugins, also copied to `~/Library/Audio/Plug-Ins/` (`MD_COPY_PLUGINS`) |
 | `build/src/cli/md-hash`, `md-machines`, `md-kits`, `md-voicediag` | the command-line tools |
 | `build/src/plugin/MdPluginCheck_artefacts/Release/MdPluginCheck` | `md-plugin-check`, the plugin's headless checks |
 
@@ -108,6 +141,81 @@ What you get:
 | `MD_COPY_PLUGINS` | `ON` | Copy the plugins to `~/Library/Audio/Plug-Ins/` after each build. |
 | `MD_OS_SYX` | *(empty)* | Path to your OS file. Used by the tests and the command-line tools. |
 | `MD_USE_JIT` | `ON` | Run the emulated DSP on dsp56300's JIT. `OFF` uses its interpreter: the same audio, bit for bit, at about four times the CPU. The configure step applies `ext/patches/0001-dsp56300-md.patch` (JIT fixes) to the `ext/dsp56300` checkout, so that submodule shows as modified. |
+| `MD_CODESIGN_IDENTITY` | `-` | What the plugin bundles are signed with after each build: `-` is ad-hoc (runs on this Mac only), or the name of a "Developer ID Application" certificate. See [Signing](#signing). |
+| `MD_CODESIGN_TIMESTAMP` | `none` | The signature's timestamp: `none` (offline), an empty value for Apple's server (notarization needs it), or a server URL. |
+| `MD_VERSION` | `0.1.0` | The version of the bundles and of the installer (`release/build_release.sh -v` sets it). |
+| `CMAKE_OSX_ARCHITECTURES` | *(this Mac's)* | `arm64;x86_64` builds a universal binary, see [below](#universal-binary-and-intel). |
+
+### Signing
+
+A Ninja or Makefile build leaves JUCE's bundles with only the linker's ad-hoc signature and none of the entitlements
+that JUCE writes for them (`HARDENED_RUNTIME_OPTIONS` in `src/plugin/CMakeLists.txt`); only the Xcode generator applies
+those. The emulated DSP needs them: under the hardened runtime, which notarization requires, a process without
+`com.apple.security.cs.allow-jit` cannot map the JIT's executable memory (`md-hash` signed with the hardened runtime and
+no entitlements stops with `JIT failed: 2 - InvalidArgument`). So the build signs the AU, the VST3 and the standalone
+app again after linking them (`cmake/codesign.cmake`):
+
+```
+codesign --force --options runtime --timestamp=none --entitlements <JUCE's file> -s "$MD_CODESIGN_IDENTITY" <bundle>
+```
+
+and only then copies them to `~/Library/Audio/Plug-Ins/`. `codesign -d --entitlements - Moduledrum.app` shows the three
+entitlements (allow-jit, allow-unsigned-executable-memory, disable-library-validation). `codesign` keeps entitlements in
+executables only, so the AU and VST3 bundles carry the hardened-runtime flag but no entitlements: a plugin runs in its
+host's process, and it is the host's entitlements that decide whether the JIT may run there. Changing
+`MD_CODESIGN_IDENTITY` and building again signs the bundles again.
+
+### Universal binary and Intel
+
+```bash
+cmake -S . -B build-universal -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+```
+
+builds the plugins, the standalone app and the command-line tools for both architectures (dsp56300 and asmjit select
+their JIT back end by compiler macro, so one configure is enough; `lipo -archs` shows both). **The x86_64 slice is not
+trusted yet:** run under Rosetta, its `md-hash` and most tests are right, but the JIT lockstep check finds the x64 JIT
+disagreeing with the interpreter in one flag, and the plugin render and state checks crashed intermittently (details in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). Treat it as experimental until it has run on an Intel Mac. To run
+the tests of the x86_64 slice on Apple Silicon (an arm64 CMake's `ctest` cannot be started with `arch -x86_64`), let
+CMake start every test through Rosetta:
+
+```bash
+cmake -S build-universal -B build-universal "-DCMAKE_CROSSCOMPILING_EMULATOR=arch;-x86_64"
+MD_OS_SYX=... MD_KITS_SYX=... ctest --test-dir build-universal --output-on-failure
+```
+
+(or `arch -x86_64 build-universal/src/cli/md-hash <OS>` for the golden hash alone; `-UCMAKE_CROSSCOMPILING_EMULATOR`
+puts it back.)
+
+### Making a release
+
+```bash
+release/build_release.sh [-v version] [-s identity] [-n] [-a arm64|universal]
+```
+
+configures a clean Release build in `build-release/`, builds it, runs the tests that need no OS file, checks the
+signatures, and writes `dist/Moduledrum-<version>-macos-<arm64|universal>.pkg` (component packages for the AU, the VST3
+and the app, joined by a distribution, installing to `/Library/Audio/Plug-Ins/` and `/Applications`) and the `.zip` of
+the three bundles, with a `.sha256` file. It installs nothing. With no options the build is arm64 and ad-hoc signed,
+and the script says that notarization was skipped. `-a universal` adds the x86_64 slice (see above). For a signed and
+notarized release you need an Apple Developer account and, in your keychain, the certificates *Developer ID
+Application* and *Developer ID Installer*:
+
+```bash
+# once: store the notarization credentials in the keychain under a profile name (an app-specific password for your
+# Apple ID, made at appleid.apple.com, or an App Store Connect API key with --key/--key-id/--issuer)
+xcrun notarytool store-credentials "moduledrum-notary" --apple-id you@example.com --team-id TEAMID --password xxxx-xxxx-xxxx-xxxx
+
+export MD_NOTARY_PROFILE=moduledrum-notary
+export MD_INSTALLER_IDENTITY="Developer ID Installer: Your Name (TEAMID)"
+release/build_release.sh -v 0.1.0 -s "Developer ID Application: Your Name (TEAMID)" -n
+```
+
+`-n` signs with Apple's timestamp, submits the installer with `notarytool submit --wait`, staples the ticket to it
+and to the three bundles, and only then writes the `.zip`. `MD_CMAKE_ARGS` adds arguments to the configure step (for
+example `-DFETCHCONTENT_SOURCE_DIR_JUCE=<a JUCE 8.0.9 checkout>`). Nothing derived from the OS file is ever packaged:
+the plugin asks for it at run time. GitHub Actions (`.github/workflows/build.yml`) builds and tests every push on an
+Apple Silicon runner and uploads the arm64 bundles; the tests that need the OS file are skipped there.
 
 ### Tests
 
@@ -115,7 +223,7 @@ What you get:
 MD_OS_SYX=/path/to/Elektron_SPS1-1UW_OS1.63.syx ctest --test-dir build --output-on-failure
 ```
 
-Without the OS file, the tests that run the engine are reported as skipped and the rest still run.
+Without the OS file, the tests that run the engine are reported as skipped and the rest still run (that is what CI does).
 `MD_KITS_SYX=/path/to/a kit dump .syx` adds the kit cases: kit files decoded and re-encoded byte for byte, a kit through
 the plugin's parameters and saved state, and the editor's kit browser. `plugin-editor` drives the editor headlessly;
 `md-plugin-check --snapshot <dir>` renders its pages to PNG for review (they show artwork read from your OS file, so
@@ -160,7 +268,9 @@ The engine in `src/core/md` is sd88me's, vendored from Machinemodule for MPC OS
 - **CPU.** The emulated DSP runs on dsp56300's JIT, bit-exact with its interpreter. On Apple Silicon, 16 tracks cost
   about 5% of one core on `md-hash`'s sparse pattern and about 7% with every track retriggered 8 times per beat
   (the interpreter: 18% and 32%). An idle instance still runs the whole DSP every block.
-- **macOS only** for now, and no packaged release.
+- **macOS only** for now. Releases are arm64 (Apple Silicon); the x86_64 slice of a universal build is experimental: the
+  x64 JIT disagrees with the interpreter in the Z flag after one loop (the audio is unaffected so far) and the plugin
+  render and state checks crashed intermittently under Rosetta, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Settings and data
 
