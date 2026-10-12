@@ -44,6 +44,13 @@ namespace md::engine
 		// Call any OS routine (C calling convention, up to 4 32-bit arguments). Returns d0, or -1 on a fault.
 		int64_t call(uint32_t _address, std::initializer_list<uint32_t> _args);
 
+		// Run OS code from _address until the program counter reaches _stopPc (that instruction is not executed), as if an
+		// rts stood there and without writing one into the image: for a stretch in the middle of a larger routine (the tail
+		// of the tick routine that works out the master effects' words, $20b4a2 to $20ba4c) that only reads absolute
+		// addresses. Returns d0, or -1 on a fault (the instruction budget, or an access outside RAM). If the code
+		// returns before reaching _stopPc, that is the end of the call too.
+		int64_t callUntil(uint32_t _address, uint32_t _stopPc, std::initializer_list<uint32_t> _args = {});
+
 		// OS memory, as the ColdFire sees it: main RAM $200000-$2fffff (initialised from the OS image, so its
 		// initialised data is right), internal SRAM $1000000-$100ffff (the OS's copy of its fast routines from
 		// image $2622f4, and their data). Big-endian.

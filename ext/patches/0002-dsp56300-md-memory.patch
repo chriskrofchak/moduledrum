@@ -1,0 +1,34 @@
+Moduledrum's second patch for dsp56300 (sd88me's fork at 26558e5401fa134a013eca8dbb8c5ecde837ec55, ext/dsp56300): memory,
+not emulation (.clew increment 0009, the RAM question). It changes no instruction's behaviour: the interpreter and the JIT
+render the same audio as before (md-hash 04ef1db4fe767721, the kits, the master hashes). The change is marked "MD patch"
+in the source. 0001-dsp56300-md.patch has the JIT fixes; the two are independent (different files) and either order applies.
+
+1. dsp56kBase/mmuhelper.cpp, MmuHelper::mapRegion: dropped the mlock() of every mapping. MemoryBuffer maps an emulated DSP's
+   memory (P, X, Y; the bridged SRAM once per view; and a scratch block for every other address up to $ffffff, so that the
+   JIT needs no bounds checks) three times over the whole 16 M-word range. Wiring those mappings faults in every page of
+   each of them and counts it once per mapping: 192 MB of resident pages per DSP (measured with task_info phys_footprint:
+   a bare Memory 192.1 MB with, 0.1 MB without) for a backing store of ~40 MB of which a program touches a few MB.
+   Without the mlock only the pages the DSP uses cost anything. Cost of leaving them unwired: a first touch of a page
+   takes a page fault (a zero page from the shared backing store) instead of every page being resident up front; the
+   emulators run the boot (the init routines clear their RAM) before the first block, so a live block faults nothing new.
+
+Not in the patch, because dsp56300 already has the switch: Audio's ring buffers (2 x 32768 frames per ESSI, 80 MB per
+DSP56303 for hosts that never use them) shrink with -DDSP56300_AUDIO_RINGBUFFER_SIZE=64, which src/core/CMakeLists.txt
+defines on dsp56kEmu (PUBLIC, the class layout must agree in every target).
+
+diff --git a/source/dsp56kBase/mmuhelper.cpp b/source/dsp56kBase/mmuhelper.cpp
+index b98b6c54..59e6d8f1 100644
+--- a/source/dsp56kBase/mmuhelper.cpp
++++ b/source/dsp56kBase/mmuhelper.cpp
+@@ -271,7 +271,10 @@ namespace dsp56k
+ 		auto* p = mmap(_targetAddr, _byteSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, m_hBackingStore, static_cast<off_t>(_backingByteOffset));
+ 		if (p == _targetAddr)
+ 		{
+-			mlock(p, _byteSize);
++			// MD patch: no mlock(). Wiring a mapping faults in and counts every page of it, and an emulated DSP maps its memory
++			// (P, X and Y, the bridged SRAM three times, and the scratch range above it) over the whole 16 M-word address
++			// space: 192 MB of resident, wired pages per DSP for ~40 MB of backing store of which a program touches a few MB.
++			// Left unwired, only the pages the DSP uses cost anything.
+ 			m_mappedRegions.insert(std::make_pair(p, _byteSize));
+ 			return p;
+ 		}

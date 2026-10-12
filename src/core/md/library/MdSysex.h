@@ -28,6 +28,7 @@
 //
 // Output routing (OUT A-F, main) is not part of a kit: the MD keeps it in the global settings ($50), not read here.
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -72,15 +73,37 @@ namespace md::library
 	std::vector<uint8_t> encode7(const uint8_t* _p, size_t _n);
 	constexpr size_t packed7Size(const size_t _n) { return _n + (_n + 6) / 7; }
 
-	// The master effects of a kit: the four blocks as the kit stores them, 8 raw values (0-127) each. Not used by the
-	// engine yet (it has no DSP1 master section, .clew increment 0009). The parameters in each block follow the order
-	// of the MD's effect pages; the init kit's values fit it (reverb DEC 64, LP 127, GATE 127 = off; EQ gains 64 = 0 dB).
+	// The master effects of a kit: the four blocks as the kit stores them, 8 raw values (0-127) each, in the order of the
+	// OS's own kit RAM (reverb, echo, EQ, dynamix: $70042a, $700432, $70043a, $700442). The names below are confirmed by
+	// what the OS does with each byte (increment 0009, the research spike): it turns the 32 bytes into the 38 words of the
+	// mixer DSP's master section, and each index feeds the role its name says (reverb index 6 is the gate and 127 switches
+	// it off, echo 4 and 5 are the loop filter, EQ 4 and 5 are the parametric band's frequency and gain, 6 its Q). The
+	// engine runs them (engine::MasterFx, HostModel::setMasterFx). The editor's pages run ECHO, REV, EQ, DYN, as on the
+	// hardware's menu; storage and this struct keep the dump's order.
 	struct MasterFx
 	{
 		std::array<uint8_t, 8> reverb{};	// gate box: DVOL PRED DEC DAMP HP LP GATE LEV
 		std::array<uint8_t, 8> delay{};		// rhythm echo: TIME MOD MFRQ FB FILTF FILTW MONO LEV
 		std::array<uint8_t, 8> eq{};		// master EQ: LF LG HF HG PF PG PQ GAIN
 		std::array<uint8_t, 8> dynamics{};	// dynamix: ATCK REL TRHD RTIO KNEE HP OUTG MIX
+
+		// The 32 bytes in the dump's order, the engine's master::kParams (HostModel::setMasterFx(i, bytes[i]))
+		std::array<uint8_t, 32> bytes() const
+		{
+			std::array<uint8_t, 32> b{};
+			std::copy(reverb.begin(), reverb.end(), b.begin());
+			std::copy(delay.begin(), delay.end(), b.begin() + 8);
+			std::copy(eq.begin(), eq.end(), b.begin() + 16);
+			std::copy(dynamics.begin(), dynamics.end(), b.begin() + 24);
+			return b;
+		}
+		void setBytes(const uint8_t* _b)
+		{
+			std::copy(_b, _b + 8, reverb.begin());
+			std::copy(_b + 8, _b + 16, delay.begin());
+			std::copy(_b + 16, _b + 24, eq.begin());
+			std::copy(_b + 24, _b + 32, dynamics.begin());
+		}
 	};
 
 	// A track's LFO (LFO k belongs to track k; its speed, depth and shape mix are the track's parameters 21-23)
@@ -109,7 +132,7 @@ namespace md::library
 		std::array<std::array<uint8_t, kParams>, kTracks> params{};
 		std::array<uint8_t, kTracks> level{};			// track LEV, 0-127
 		std::array<Lfo, kTracks> lfo{};
-		MasterFx masterFx;								// kept for later (increment 0009)
+		MasterFx masterFx;								// the four master effect blocks (engine: HostModel::setMasterFx)
 		std::array<uint8_t, kTracks> trigGroup{};		// track to trigger along with this one, 0xff = none
 		std::array<uint8_t, kTracks> muteGroup{};		// track to mute when this one plays, 0xff = none
 		bool checksumOk = true;							// the message's checksum and length matched (decoding goes on if not)

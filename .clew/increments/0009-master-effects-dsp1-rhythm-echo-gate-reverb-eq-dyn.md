@@ -435,18 +435,159 @@ cost), `mfx2` (impulses, latency, gain, DVOL, reverb mono), `mfx5` (whole DSP1 v
 runner `poke16(0x20ba4c, 0x4e75)`, `poke32(0x100150c, BPM*24)`, `poke16(0x1000d9c + 2i, v << 7)`, `poke32(0x265404, group)`,
 `call(0x20b4a2)`, then read longs at `$1001af4`, `$1001b18`, `$1001b44`, `$1001b74`.
 
+## 10. Engine side, implemented (steps 1-3 and the RAM half of step 7; 2026-10-12, branch `worktree-agent-acdce1a701849f20b`)
+Everything of sections 6 and 7 steps 1-3 was done as specified; what is below is what exists, what was recorded, and what the
+implementation found that the spike did not know.
+
+### What exists
+- `src/core/md/MasterFx.{h,cpp}`: `MasterFx(const Firmware&, bool interpreter = false)`, `available(fw)`, `reset()`,
+  `setWords(38)` / `writeGroup(group, words)` (the 38 words in `master::kGroup` order: ascending Y address, OS group g = 0 echo,
+  1 dynamix, 2 EQ, 3 reverb), `snapEcho()`, `process(const Mixer::Output&, Mixer::Stereo&)`, `warmUp(wordSets, n)`,
+  `compiledBlocks()`, `readX/readY/dsp()` for tools, `faultReason()` (a sticky JIT failure or an overrun block).
+  `namespace master`: `kParams` 32, `kWords` 38, `kGroups` 4, `kGroup[]`, `kDefaultParams` (the cleared kit), `kDryLatency` 18.
+- `HostModel`: `setMasterFx(i, v)` / `masterFx(i)`, `masterWords()` + `takeMasterGroups()` (a bit per group worked out since the
+  last call), `primeMasterFx()`, `computeMasterWords(bytes, bpm, out)` (exact values, the host left as it was),
+  `masterWarmUpWords(n, out)`. The tick runs group `tickCount & 3` after the OS's slew (`$100029e`) through
+  `MachineRunner::callUntil($20b4a2, $20ba4c)` (nothing patched into the OS image; D2-D7/A2-A6 and the tick counter `$265404` put
+  back). A new `HostModel` starts on `master::kDefaultParams`, settled by the OS's slew, all four groups due.
+- `EngineT` (`MdEngine.h`): `EngineOptions{bool master = true}` as the last constructor argument of both constructors,
+  `Output::master` (`Mixer::Stereo`, 24 bit), `hasMaster()`, `master()`, `primeMaster()`, `masterBypass`, `voiceOutput()`,
+  `masterUs`, `kMasterWarmUpSets` = 24; `fault()` is the voice DSP's else the master's; `render()` is false on either's fault.
+  Order inside `render()`: voices, tick (words worked out), track fx, mixer, then the pending word groups to the master DSP,
+  then the pass. `ParallelEngine` is the same code.
+- `library::MasterFx::bytes()` / `setBytes()` (the kit's four blocks <-> the 32 bytes); `MdSysex.h` / `KitApply.h` comments.
+- Tests: `tests/Dsp1Reference.{h,cpp}` (the oracle: DSP1's whole main loop), `tests/test_master.cpp`; ctest `master` (`mfx_*`),
+  `master-host` (`mhost_*`), `golden-master` (`gmaster_*`), `master-ram` (`ram_*`). `md-hash` `MD_MASTER=1|dry|wet|kit:N`.
+  `GoldenPattern.h`: `kMasterDry`, `kMasterWet`, `Pattern::hashMaster`, `render(..., &masterHash)`.
+- RAM: `ext/patches/0002-dsp56300-md-memory.patch`, `DSP56300_AUDIO_RINGBUFFER_SIZE` in `src/core/CMakeLists.txt`.
+
+### Acceptance, as recorded (JIT build; the interpreter build gives the same numbers where numbers are not timings)
+Step 1 (`ctest master`, OS file only):
+- (a) `mfx_jit_vs_interpreter`: 3200 blocks, 80 random kits (bytes 0 or 127 one time in four each, tempi 60-240, signals per bus:
+  silence, noise, full-scale square, impulses), **16 764 800 words compared, 0 differences** (outputs, X:$000-$1ff, the frame, the
+  buffers, Y:$000-$1c9, the dynamix ring, a stride sample of the echo and reverb rings). Skipped on `MD_USE_JIT=OFF`.
+- (b) `mfx_vs_whole_dsp1_loop`: EFM, BOOGIE, ALIENS x 4000 blocks of the golden pattern (with master byte edits at 1/3 and 2/3 of
+  the run: echo TIME up and down, FB, MONO, gate on, EQ PG, compressor threshold), frame channels 2 and 5, X:$180-$1bf and
+  Y:$150-$1c1 after every block: **2 904 000 words compared, 0 differences** (968 000 per kit).
+- (c) `mfx_block_cost_and_no_compile`: warm-up 40-46 ms, the cold first block 7.3 ms; 4000 live blocks over 100 random kits:
+  **median 9.6-10.9 us, mean 10.0-11.0 us, p99 12-14 us, max 30-84 us (a scheduling outlier); 0 mallocs in all 4000**
+  (macOS `malloc_logger`; a JIT compile allocates). On the interpreter build (LTO): median 74 us, p99 90 us, 0 mallocs (the spike measured 143 us without LTO); `md-hash` 81 us a block.
+  `gmaster_no_compile_while_playing`: `compiledBlocks()` (compiled entry points) = 672 after construction and still 672 after the golden pattern and 6000
+  blocks of changing kits and tempi.
+- (d) `md-hash` `04ef1db4fe767721` on the JIT, the interpreter, `MD_GROUPS=2` and `4`, with the master stage built or not.
+Step 2 (`ctest master-host`): the 38 words of the 1.3 test vector reproduce exactly (EFM, 120 BPM, smoothed values `v << 7`;
+note EFM's DVOL is 105, the spike's transcribed byte list had 0 there); the 16 preset kits' converged words (from the cleared
+kit's settled state, 125 BPM) hash to `3f50575c608c9c35` (FNV-1a over 16 x 38 words); the slew: 96 -> 127 ends at 127 x 128 - 3,
+127 -> 10 at exactly 10 x 128, 10 -> 11 at 11 x 128 - 3; a tempo change 125 -> 90 moves only Y:$150, 90 -> 30 (TIME 100: the
+delay no longer fits the ring) moves only Y:$150 (= $20) and Y:$151, back to 125 restores both; the cadence: groups 0, 1, 2, 3, 0 ... one per tick, an EQ GAIN edit shows
+in Y:$179 on the third tick; a new engine's first block has Y:$150 = the primed word and Y:$15a = Y:$150.
+Step 3 (`ctest golden-master`, `md-hash`): master-output hashes of the golden pattern, **identical on the JIT and the interpreter
+build** (the same constants in both):
+
+| master bytes | `MD_MASTER=` | master hash |
+|---|---|---|
+| cleared kit (`master::kDefaultParams`) | `1` | `3c37e206683bf50e` |
+| dry-ish synthetic (`kMasterDry`: reverb/echo levels 0, EQ flat, dynamix open) | `dry` | `fe784d9f02fa30b2` |
+| wet synthetic (`kMasterWet`) | `wet` | `9b8a53ca6fae15fe` |
+| kit 0 TRX | `kit:0` | `5f4b45659f477ab7` |
+| kit 1 EFM | `kit:1` | `1222389a11b38fe6` |
+| kit 9 BOOGIE | `kit:9` | `2abcba9c5e9bf547` |
+| kit 13 ALIENS | `kit:13` | `b892b2c5f5a1e43b` |
+
+Next to each the dry hash printed is `04ef1db4fe767721`; kit 0 on a fresh engine `f5c618b7df5550fa` (ctest `kits`); `MD_SWEEP=1`
+identical to the run before the change, per machine, on both builds. `gmaster_engine_is_the_chain_by_hand`: the engine's master
+hash equals the native chain + a fresh MasterFx (no warm-up) fed the host's groups by hand; `gmaster_parallel_engine`: the same
+hash with `ParallelEngine` (2 voice groups); `gmaster_bypass`; `gmaster_disabled_is_silent`. `mfx_dry_latency`: an impulse comes
+out 18 frames later, on the same channel, for the cleared kit, dry-ish and wet.
+The candidate values of section 5 (static words, no slew) are reproduced exactly by `HostModel::computeMasterWords` +
+`MasterFx` on the golden pattern: EFM `91b5d84165c0c467` (JIT and interpreter), TRX `76c6ee93aebc899e`.
+
+### Cost and RAM, as measured here (M-series, JIT)
+- `md-hash` render of the 12 s pattern: 590 ms without, 800 ms with the master stage (master 195 ms = 11.8 us a block); OS tick
+  71 ms (the master group calls are in it). Interpreter: master 1334 ms of 3771.
+- `Engine` construction: 7 ms without the master section, 60 ms with (boot 6 ms, warm-up ~50 ms).
+- phys_footprint (`task_info`), one process per configuration:
+
+| | before | after |
+|---|---|---|
+| bare `Memory` (P 2 M, XY 8 M, bridge 128 k) | 192.1 MB | 0.2 MB |
+| `Peripherals56303` (two ESSI ports) | 80.7 MB | 0.0 MB |
+| booted `VoiceEngine` | 357.8 MB | 86.5 MB |
+| booted `MasterFx` | 361.8 MB | 90.5 MB |
+| `Engine`, no master | 358.6 MB | 87.3 MB |
+| `Engine` with master (after 3000 blocks) | 837.3 MB | 303.4 MB |
+
+Interpreter build after the change: master DSP 118 MB, voice DSP 108 MB (its opcode cache, 48 bytes per P word, is 100 MB).
+Causes (the spike's suspicion, `MemoryBuffer`'s three aliased 16 M-word mappings, was right and the mechanism is not the mappings
+but the `mlock()` that `MmuHelper::mapRegion` puts on each: wiring faults in every page of every alias): (1) the `mlock`, 192 MB
+per DSP; (2) the ESSI audio ring buffers, 2 x 2 x 32768 frames = 80 MB per DSP (dsp56300 has `DSP56300_AUDIO_RINGBUFFER_SIZE`
+for hosts that do not stream audio through them). Both removed; the audio is bit-identical (all hashes above).
+Best lead for the rest: the JIT keeps one block chain per DSP mode (`JitDspMode`: the AGU registers' addressing modes and the
+scaling/saturation bits), each with an array of 8 bytes per P address up to the highest P word ever written (`Jit`'s
+`m_maxUsedPAddress`: 1 326 698 for DSP1 because its init code sits at $143e4a: 10.6 MB per chain). The master pass visits 17 modes
+(its `move #$1f,m4/m5` and the like): ~130 MB of the 303. `DSP::execJit` indexes the array unchecked (`m_jitEntries[pc]`), so
+growing it on demand needs a bounds check in the dispatch; on macOS the `MmuArray` lazy path is disabled (EXC_GUARD). A
+change to the program's modes is not possible (it is the OS's code). Not done.
+
+### What the implementation found (for whoever touches this)
+- **Warm-up and a clean state.** `reset()` after a warm-up is not a fresh instance: DSP1's init does not clear Y:$000-$03f (the
+  reverb return scratch) and the reverb gate's state words in the table area (X/Y:$14397b-$14398a), 269 Y and 15 X words differed.
+  `warmUp()` therefore snapshots DSP memory (X view $200000 words, Y and P internal $20000) and puts it back by the DSP's own writes;
+  a reset would also invalidate the JIT blocks at the end of the pass ($9a8/$9a9 are patched). `mfx_warmup_leaves_a_fresh_state`:
+  600 blocks, 3 105 000 words, 0 differences between a fresh and a warmed instance.
+- **JIT coverage needs sweeps.** The data-dependent branches compile lazily; the compressor's knee region (P:$927-$92b) is only
+  reached when the dynamix's envelope moves between its two thresholds, e.g. on the returns of the sends while the dry bus is silent,
+  and a signal that only switches between a few levels never does. The warm-up draws a kind of signal per bus and per word set
+  (noise rising from -102 dB or falling, steady, squares, impulses, silence); 24 sets x 140 blocks compile all 672 entries
+  (a scratch coverage run over 6 seeds x 4000 random live blocks, and the tests, found no block left).
+- The tail of the OS's tick routine ($20b4a2-$20ba4c) reads absolute addresses only and sets D5, D6, A0 and A1 itself (checked in the
+  disassembly), so `callUntil` from the middle of the routine is exact; a patched `rts` is not needed.
+- A tempo change moves Y:$151 only when the delay no longer fits the ring (TIME x 82 688 / BPM > 96 987 samples); below that
+  Y:$151 stays $4001.
+- `EngineT` defaults the master section on; `md-hash` (except `MD_MASTER`), `md-kits` and the sweep build the engine without it. A
+  plugin that constructs `Engine(fw, os)` now gets the second DSP (+90 MB, +55 ms, +12 us a block) whether it uses `Output::master` or not.
+
+## Remaining (plugin side: steps 4-6), with what the engine gives you
+- **Apply a kit's master bytes**: `applyKit` does not (it would move nothing dry, but the plugin has its own parameter path): per
+  kit load `for i in 0..31: host.setMasterFx(i, kit.masterFx.bytes()[i])`, then `engine.primeMaster()` to start at the kit's
+  settings without the glide (the hardware glides on a kit change, as it does on a knob turn; `primeMaster` also snaps the echo's
+  delay offset). `Kit::masterFx.setBytes()` for the way back (`parametersToKit`). Order inside a kit in the host parameters: the
+  dump's (reverb 0-7, echo 8-15, EQ 16-23, dynamix 24-31); the editor's pages are ECHO, REV, EQ, DYN (section 2).
+- **Calls are the same as `setParam`/`trigger`**: `setMasterFx` and `primeMaster` between blocks, under the engine lock, never
+  during a render; `process` runs inside `render()`. Nothing allocates on the audio path (the master adds none; run `plugin-rt`).
+- **Default state of a new engine**: `master::kDefaultParams` (= the init kit of `OneProcessor.cpp`), settled, so the first
+  block is at those settings. `HostModel::setTempo` reaches the echo through the group cadence (a tempo change glides the echo
+  for at most 4 ticks + its own glide, as on the hardware); set the tempo before `primeMaster()` when the sound should start at it.
+- **Master on/off (`master_fx`)**: `engine.masterBypass = true` skips the pass (12 us a block) and zeroes `Output::master`; the
+  words keep flowing and the DSP stands, so switching back on continues. `EngineOptions{false}` builds no second DSP at all (RAM).
+  The plugin hashes `da62047690565e38`, `a28b9dc178776939`, `14291ff9302212d4` are of `Output::mix.main` and do not move with the
+  master built; with the master as the main bus they change by definition: record a second set (both note maps).
+- **Main bus with the master on**: `Output::master` replaces `mix.main` (it contains the dry bus, the echo and the reverb, and
+  tracks routed to outputs A/B: frame channels 2/5). It is not level-neutral (the spike measured: EQ GAIN 127 is +5.8 dB with the
+  dynamix bypassed, about -2.6 dB for a quiet sine with the cleared kit's dynamix) and the dry path is `master::kDryLatency` = 18 frames behind: delay the track buses and
+  the send buses by 18 engine frames (the resampler's latency stays on top), add them to the reported latency, and set
+  `getTailLengthSeconds` to ~6 s while the master is on (echo ring 2.2 s with feedback, reverb decay up to 3 s). The reverb and
+  delay send buses are the dry sends (before the master), as designed.
+- **Warm-up**: the engine's constructor already compiled the master (`kWarmUpBlocks = 16` silent blocks in the processor's warm-up
+  run through it harmlessly); no 13 ms stall on the first live block.
+- **Not done / for later**: control machines (CTR-RE/GB/EQ/DX), the idle skip of the master pass (step 7, with 0013), B
+  (a C++ translation; with `Dsp1Reference` as oracle it is still possible, and RAM is no longer the argument for it: the
+  master DSP is 90 MB + its JIT chains), the x64 JIT on DSP1 (never run), the README's feature list.
+
 ## Tasks
 - [x] Read HANDOFF.md/PROTOCOL.md on DSP1's master section
 - [x] Locate the master code and parameters in section 2 and the OS; decode the 38 words and their sources
 - [x] Boot DSP1 on dsp56300 and drive it from a harness; verify against the native chain and against the whole loop
 - [x] Measure cost (instructions, JIT, interpreter, RAM), compare approaches, recommend
 - [x] Confirm the kit's master parameter order
-- [ ] Step 1: `MasterFx` engine stage and its tests
-- [ ] Step 2: master parameters in `HostModel` (OS pipeline, priming)
-- [ ] Step 3: engine integration, `golden-master` hash
+- [x] Step 1: `MasterFx` engine stage and its tests (section 10)
+- [x] Step 2: master parameters in `HostModel` (OS pipeline, priming)
+- [x] Step 3: engine integration, `golden-master` hash
 - [ ] Step 4: kits and host parameters
 - [ ] Step 5: plugin audio path (bypass, alignment, latency, tail)
 - [ ] Step 6: editor MASTER pages
-- [ ] Step 7: RAM breakdown and trim; idle skip (with 0013)
+- [x] Step 7a: RAM breakdown and trim (192 MB of mlock and 80 MB of ring buffers per DSP removed; the JIT's block chains are the lead left, section 10)
+- [ ] Step 7b: idle skip of the master pass (with 0013)
 - [ ] Step 8 (optional): C++ translation with `Dsp1Reference` as oracle
-- [ ] Step 9: docs
+- [x] Step 9a: docs: `docs/DEVELOPMENT.md`, the `MdSysex.h` and `KitApply.h` comments
+- [ ] Step 9b: the README's feature list, once the plugin has the master

@@ -3,6 +3,7 @@
 // reverb/delay sends. Equal hashes = identical audio. md-hash and the golden test share it, so they render the same thing.
 // Ported from sd88me/mpc-vst-machinedrum tools/mdhash/mdhash.cpp (AGPL-3.0).
 #pragma once
+#include <array>
 #include <cstdint>
 
 #include "MdEngine.h"
@@ -13,6 +14,22 @@ namespace md::golden
 	// for 1, 2 and 4 voice groups. Any engine change must keep it.
 	constexpr uint64_t kHashOs163 = 0x04ef1db4fe767721ull;
 	constexpr int kBlocks = 44100 * 12 / 32;
+
+	// Synthetic master effects settings (the 32 kit bytes, engine::master::kParams order) for the master-output hashes: almost
+	// nothing but the EQ and the dynamix at their defaults, and every effect working. Fixed, so that the hashes in
+	// tests/test_master.cpp and md-hash's MD_MASTER mean the same thing everywhere.
+	constexpr std::array<uint8_t, 32> kMasterDry = {
+		0, 0, 64, 0, 0, 127, 127, 0,			// reverb: DVOL PRED DEC DAMP HP LP GATE LEV (silent)
+		32, 0, 32, 0, 0, 127, 0, 0,				// echo: TIME MOD MFRQ FB FILTF FILTW MONO LEV (silent)
+		64, 64, 64, 64, 64, 64, 64, 127,		// EQ flat
+		127, 127, 127, 127, 127, 127, 0, 0,		// dynamix open
+	};
+	constexpr std::array<uint8_t, 32> kMasterWet = {
+		64, 20, 100, 30, 10, 110, 127, 110,
+		24, 20, 40, 80, 20, 100, 30, 100,
+		80, 90, 80, 40, 70, 90, 80, 120,
+		20, 50, 60, 90, 40, 30, 40, 100,
+	};
 
 	class Pattern
 	{
@@ -59,16 +76,30 @@ namespace md::golden
 
 		uint64_t hash() const { return m_hash; }
 
+		// The master output (EngineT::Output::master) has a hash of its own, so that the one above stays what it was
+		void hashMaster(const engine::Mixer::Stereo& _master)
+		{
+			for(int f = 0; f < 32; ++f)
+				for(int ch = 0; ch < 2; ++ch)
+				{
+					m_masterHash ^= uint64_t(int64_t(_master[f][ch]));
+					m_masterHash *= 1099511628211ull;
+				}
+		}
+		uint64_t masterHash() const { return m_masterHash; }
+
 	private:
 		unsigned rnd() { m_rs = m_rs * 1664525u + 1013904223u; return m_rs >> 8; }
 		void mix(const int64_t _v) { m_hash ^= uint64_t(_v); m_hash *= 1099511628211ull; }	// FNV-1a over the samples
 
 		unsigned m_rs = 99;
 		uint64_t m_hash = 1469598103934665603ull;
+		uint64_t m_masterHash = 1469598103934665603ull;
 	};
 
 	// The whole pattern on a fresh engine. _onBlock(b, output) is called after every block (md-hash's statistics and raw dump).
-	template<class E, class F> uint64_t render(E& _eng, F&& _onBlock)
+	// _masterHash (optional) receives the hash of the master output (that of silence without a master section).
+	template<class E, class F> uint64_t render(E& _eng, F&& _onBlock, uint64_t* _masterHash = nullptr)
 	{
 		Pattern p;
 		p.setup(_eng.host());
@@ -79,7 +110,10 @@ namespace md::golden
 			_eng.render(out);
 			_onBlock(b, out);
 			p.hashBlock(out.mix);
+			p.hashMaster(out.master);
 		}
+		if(_masterHash)
+			*_masterHash = p.masterHash();
 		return p.hash();
 	}
 

@@ -9,18 +9,24 @@
 //   MD_RELEASE=n  silence release after n quiet blocks (HostModel::setSilenceRelease)
 //   MD_RAW=file   main L/R as int32, for comparing two runs
 //   MD_T1=1       voice budget 1 walkthrough (prints the active voice count)
-//   MD_TIMING=1   also prints the render's wall-clock time and its stages (voice DSP, OS tick, track fx, mix)
+//   MD_TIMING=1   also prints the render's wall-clock time and its stages (voice DSP, OS tick, track fx, mix, master)
+//   MD_MASTER=s   runs the master effects too (a second emulated DSP behind the mixer) and also prints "master hash" of the
+//                 master output; s = 1 (the cleared kit's settings), dry or wet (the synthetic sets of GoldenPattern.h) or
+//                 kit:N (the master bytes of kit N of the MD_KITS_SYX file). The first "hash" line is the dry mix's and does
+//                 not move.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include "Firmware.h"
 #include "MdEngine.h"
 #include "golden/GoldenPattern.h"
+#include "md/library/MdSysex.h"
 
 // ROM machines' sample memory (tools/mdkits/mdsamples in the MPC port): "MDSM" + [addr][count] + count words, repeated
 template<class E>
@@ -40,12 +46,47 @@ static void loadSamples(E& _eng, const char* _path)
 	fclose(rf);
 }
 
+// MD_MASTER's master bytes (see the header); false when _spec names nothing usable
+static bool masterBytes(const char* _spec, std::array<uint8_t, md::engine::master::kParams>& _out)
+{
+	if(!std::strcmp(_spec, "1"))
+		_out = md::engine::master::kDefaultParams;
+	else if(!std::strcmp(_spec, "dry"))
+		_out = md::golden::kMasterDry;
+	else if(!std::strcmp(_spec, "wet"))
+		_out = md::golden::kMasterWet;
+	else if(!std::strncmp(_spec, "kit:", 4) && getenv("MD_KITS_SYX"))
+	{
+		const auto bank = md::library::loadSyxFile(getenv("MD_KITS_SYX"));
+		const size_t k = static_cast<size_t>(atoi(_spec + 4));
+		if(k >= bank.kits.size())
+			return false;
+		_out = bank.kits[k].masterFx.bytes();
+	}
+	else
+		return false;
+	return true;
+}
+
 template<class E>
 static void run(E& eng, const char* romSamples)
 {
 	if(romSamples)
 		loadSamples(eng, romSamples);
 	auto& h = eng.host();
+	const char* masterSpec = getenv("MD_MASTER");
+	if(masterSpec)
+	{
+		std::array<uint8_t, md::engine::master::kParams> bytes{};
+		if(!eng.hasMaster() || !masterBytes(masterSpec, bytes))
+		{
+			fprintf(stderr, "md-hash: MD_MASTER=%s: %s\n", masterSpec, eng.hasMaster() ? "not 1, dry, wet or kit:N (with MD_KITS_SYX)" : "this OS file has no master section");
+			exit(2);
+		}
+		for(int i = 0; i < md::engine::master::kParams; ++i)
+			h.setMasterFx(i, bytes[static_cast<size_t>(i)]);
+		eng.primeMaster();
+	}
 	if(getenv("MD_T1"))
 	{
 		md::golden::Pattern p;
@@ -66,18 +107,21 @@ static void run(E& eng, const char* romSamples)
 	const bool timing = getenv("MD_TIMING") != nullptr;
 	if(timing) { h.timingOn = true; eng.timingOn = true; }
 	const auto t0 = std::chrono::steady_clock::now();
+	uint64_t masterHash = 0;
 	const uint64_t hash = md::golden::render(eng, [&](int b, const typename E::Output& out)
 	{
 		if(b > 2000) { const int a = eng.voices().activeVoicesLastBlock(); maxActive = a > maxActive ? a : maxActive; sumActive += a; ++nb; }
 		if(raw) fwrite(out.mix.main.data(), sizeof(int32_t), 64, raw);
-	});
+	}, &masterHash);
 	const double renderMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	if(raw) fclose(raw);
 	if(!eng.fault().empty()) fprintf(stderr, "md-hash: DSP fault: %s\n", eng.fault().c_str());
 	printf("hash %016llx\n", (unsigned long long)hash);
+	if(masterSpec)
+		printf("master hash %016llx (MD_MASTER=%s)\n", (unsigned long long)masterHash, masterSpec);
 	if(timing)	// the 12 s pattern (engine already booted): the whole render and its stages, wall clock
-		printf("timing: render %.0f ms (%.1f %% of real time); voice DSP %.0f ms, OS tick %.0f ms, track fx %.0f ms, mix %.0f ms\n",
-			renderMs, renderMs / (1000.0 * md::golden::kBlocks * 32 / 44100.0) * 100.0, h.dspUs / 1000.0, h.tickUs / 1000.0, eng.fxUs / 1000.0, eng.mixUs / 1000.0);
+		printf("timing: render %.0f ms (%.1f %% of real time); voice DSP %.0f ms, OS tick %.0f ms, track fx %.0f ms, mix %.0f ms, master %.0f ms\n",
+			renderMs, renderMs / (1000.0 * md::golden::kBlocks * 32 / 44100.0) * 100.0, h.dspUs / 1000.0, h.tickUs / 1000.0, eng.fxUs / 1000.0, eng.mixUs / 1000.0, eng.masterUs / 1000.0);
 	if(getenv("MD_BUDGET") || getenv("MD_RELEASE")) printf("budget %s release %s: max rendered voices %d, mean %.2f, released %u\n", getenv("MD_BUDGET") ? getenv("MD_BUDGET") : "-", getenv("MD_RELEASE") ? getenv("MD_RELEASE") : "-", maxActive, double(sumActive) / (nb ? nb : 1), h.silenceReleases());
 }
 
@@ -96,12 +140,12 @@ int main(int argc, char** argv)
 		{
 			std::vector<int> ids;
 			{
-				md::engine::Engine e0(fwv, std::vector<uint8_t>(c.sections.at(0).data));
+				md::engine::Engine e0(fwv, std::vector<uint8_t>(c.sections.at(0).data), md::engine::EngineOptions{false});
 				for(const auto& mc : e0.os().machines()) ids.push_back(mc.id);
 			}
 			for(const int id : ids)
 			{
-				md::engine::Engine e(fwv, std::vector<uint8_t>(c.sections.at(0).data));
+				md::engine::Engine e(fwv, std::vector<uint8_t>(c.sections.at(0).data), md::engine::EngineOptions{false});
 				if(romSamples)
 					loadSamples(e, romSamples);
 				auto& hh = e.host();
@@ -123,12 +167,12 @@ int main(int argc, char** argv)
 		const int groups = getenv("MD_GROUPS") ? atoi(getenv("MD_GROUPS")) : 1;
 		if(groups > 1)
 		{
-			md::engine::ParallelEngine eng(fwv, std::move(c.sections.at(0).data), groups);
+			md::engine::ParallelEngine eng(fwv, std::move(c.sections.at(0).data), groups, md::engine::EngineOptions{getenv("MD_MASTER") != nullptr});
 			run(eng, romSamples);
 		}
 		else
 		{
-			md::engine::Engine eng(fwv, std::move(c.sections.at(0).data));
+			md::engine::Engine eng(fwv, std::move(c.sections.at(0).data), md::engine::EngineOptions{getenv("MD_MASTER") != nullptr});
 			run(eng, romSamples);
 		}
 	}
