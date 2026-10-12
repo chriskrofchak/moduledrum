@@ -50,10 +50,12 @@ Every engine or plugin change must keep these; they are what "bit-exact" means h
 |---|---|---|
 | `build/src/cli/md-hash <OS>` (also `MD_GROUPS=2`, `4`) | `hash 04ef1db4fe767721` | ctest `golden-hash`, `src/core/golden/GoldenPattern.h` |
 | Kit 0 (TRX) of the preset file, `applyKit` on a fresh engine | `f5c618b7df5550fa` | ctest `kits`, `tests/test_kits.cpp` |
-| Kit 0 through the processor (after its 16 warm-up blocks), and after a state save/restore | `da62047690565e38` | ctest `plugin-state`, `src/plugin/Check.cpp` |
-| The plugin's regression render, chromatic note map | `a28b9dc178776939` | ctest `plugin-render` |
-| The same render, the hardware's white-key note map | `14291ff9302212d4` | ctest `plugin-render` |
-| JIT = interpreter | all of the above identical with `-DMD_USE_JIT=OFF`; `MD_SWEEP=1 md-hash` identical per machine | ctest `jit`, `MD_JIT_LOCKSTEP=1` |
+| Kit 0 through the processor (after its 16 warm-up blocks), and after a state save/restore; `master_fx` off | `da62047690565e38` | ctest `plugin-state`, `src/plugin/Check.cpp` |
+| The plugin's regression render, chromatic note map; `master_fx` off (the dry main bus) | `a28b9dc178776939` | ctest `plugin-render` |
+| The same render, the hardware's white-key note map; `master_fx` off | `14291ff9302212d4` | ctest `plugin-render` |
+| The plugin's regression render with `master_fx` on (the main bus is the master output, latency removed): chromatic / white keys | `ece6201f17cf1b81` / `7fd32e31f89ea574` | ctest `plugin-master` |
+| Kit 0 through the processor with `master_fx` on = the engine's master output (`applyKit`, the kit's master bytes, `primeMaster` after 16 warm-up blocks; the sends 18 frames behind it) | `288d02a442ac6b0b` | ctest `plugin-master` |
+| JIT = interpreter | all of the above identical with `-DMD_USE_JIT=OFF` (the master-on plugin hashes too); `MD_SWEEP=1 md-hash` identical per machine | ctest `jit`, `MD_JIT_LOCKSTEP=1` |
 | The master effects' output of the golden pattern (`MD_MASTER=dry\|wet`, fixed synthetic master bytes in `GoldenPattern.h`) | dry-ish `fe784d9f02fa30b2`, wet `9b8a53ca6fae15fe`; the cleared kit's bytes (`MD_MASTER=1`) `3c37e206683bf50e`; with the master bytes of preset kits 0 (TRX), 1 (EFM), 9 (BOOGIE), 13 (ALIENS): `5f4b45659f477ab7`, `1222389a11b38fe6`, `2abcba9c5e9bf547`, `b892b2c5f5a1e43b`. The dry hash above is unchanged next to them, and all of them are identical on the JIT and the interpreter | ctest `golden-master`, `md-hash` with `MD_MASTER=` |
 | Master section against its references | JIT = interpreter on 3200 random blocks (0 of 16.7 M words differ); master-only = DSP1's whole main loop (`tests/Dsp1Reference`) on 3 kits x 4000 blocks (0 of 2.9 M); the OS's 38 parameter words (test vector, the 16 preset kits' checksum `3f50575c608c9c35`); a live block takes < 25 us and allocates nothing; a booted DSP stays under 200 MB | ctest `master`, `master-host`, `master-ram` |
 
@@ -72,11 +74,12 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
 - `md-machines <OS>`: the OS machine table (135 machines: id, name, SYN labels).
 - `md-kits list|render`: the kits of a `.syx`, and one kit rendered to a WAV (each track solo, then all).
 - `md-voicediag`: the voice DSP program as the harness sets it up, disassembled or stepped.
-- `md-plugin-check --check-os-load | --check-render | --check-state | --check-editor | --check-rt | --snapshot <dir> |
-  --bench 20`: the plugin headless. `--bench` is the CPU figure quoted below (all 16 tracks retriggered 8x per beat at
-  120 BPM, 64-sample blocks) and checks that no callback goes over budget. `--check-rt` (ctest `plugin-rt`) counts every
-  heap allocation in `processBlock` (macOS `malloc_logger` plus a replaced `operator new`) and fails on any outside
-  dsp56300's JIT compiles; `MD_RT_ALLOC_TRACE=1` prints the call stacks.
+- `md-plugin-check --check-os-load | --check-render | --check-state | --check-master | --check-editor | --check-rt |
+  --snapshot <dir> | --bench 20`: the plugin headless. `--bench` is the CPU figure quoted below (all 16 tracks
+  retriggered 8x per beat at 120 BPM, 64-sample blocks) and checks that no callback goes over budget. `--check-rt` (ctest
+  `plugin-rt`) counts every heap allocation in `processBlock` (macOS `malloc_logger` plus a replaced `operator new`) and
+  fails on any outside dsp56300's JIT compiles; `MD_RT_ALLOC_TRACE=1` prints the call stacks. `--check-master` (ctest
+  `plugin-master`) is the master effects in the plugin (increment 0009).
 
 ## Established facts and measurements (Apple Silicon, macOS 26, Apple clang 21)
 
@@ -84,9 +87,13 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
   existing build directory keeps its cached value, so pass `-DMD_USE_JIT=ON` once. OFF defines
   `DSP56K_NO_JIT_RUNTIME` on every target (the constant `g_useJIT` is in the emulator's headers, so all targets must
   agree) and is the reference the JIT is checked against.
-- **CPU:** `md-hash`'s 12 s of 16-track audio renders in 0.6 s on the JIT (2.2 s on the interpreter). The plugin bench:
-  **7.2 / 7.5 / 7.7 % of one core at 44.1 / 48 / 96 kHz** with all 16 tracks hammered, worst callback ~260 µs against
-  a 1451 µs budget (interpreter: ~33 %). An idle instance still runs the whole DSP every block (open work 0013).
+- **CPU:** `md-hash`'s 12 s of 16-track audio renders in 0.6 s on the JIT (2.2 s on the interpreter). The plugin bench
+  (`md-plugin-check --bench 20`, increment 0009), as it ships with the master effects on: **8.8-9.0 / 9.1 / 9.2-9.4 % of
+  one core at 44.1 / 48 / 96 kHz** with all 16 tracks hammered (three runs), 99.9th percentile callback ~280 µs against a
+  1451 µs budget, none over it in two of the three runs (the third, with another process spinning a core, had 1 of 13091
+  at 1.6 ms: preemption; its 99.9 % was 280 µs); **7.2 % with the master off** (before the master: 7.2 / 7.5 / 7.7 %;
+  interpreter: ~33 %). The engine alone with the master: 8.8-9.0 %. An idle instance still runs the whole DSP (both
+  DSPs with the master on) every block (open work 0013).
 - **Memory:** a booted emulated DSP takes about 90 MB (JIT; ~110 MB on the interpreter, whose opcode cache is 100 MB of
   it), measured as `task_info` `phys_footprint`: a plain engine 87 MB, with the master effects (a second DSP) 303 MB. It was
   358 MB per DSP (the 420-500 MB per instance quoted before; the MPC port trimmed some of it) until two defaults of the
@@ -112,8 +119,21 @@ Useful tools (all in `build/src/cli` or `build/src/plugin/MdPluginCheck_artefact
   74-81 us on the interpreter build), ~90 MB, 55 ms to build (6 ms boot, then a warm-up that compiles every JIT block (672 entry points) over
   synthetic signals and puts DSP memory back, so that a live block compiles and allocates nothing). The pass is not
   level-neutral against the dry bus (dry goes through EQ, dynamix and GAIN too; the cleared kit is about -2.6 dB) and the
-  dry path comes out `master::kDryLatency` = 18 frames late. The plugin and editor side is still to do (increment 0009).
-- **Latency:** 0 samples at 44.1 kHz, 40 at 48 kHz, 79 at 96 kHz (the resampler), reported to the host.
+  dry path comes out `master::kDryLatency` = 18 frames late.
+- **Master effects, plugin side (increment 0009):** the 32 bytes are host parameters (`fx_rev_dvol` .. `fx_dyn_mix`) fed to
+  `HostModel::setMasterFx` at each block (an edit glides, as on the MD); a kit load, a restored state and a new engine
+  set a flag that makes the next block call `EngineT::primeMaster()` after the parameters and the tempo (allocation-free,
+  `plugin-rt`). With `master_fx` on the main bus is `Output::master` and every other stream (sends, track buses) goes
+  through an 18-frame delay line (fed in either mode, so switching finds it full); the converter then reads the streams
+  at `(m - L) x 44100 / rate + 18` with `L = ceil((35 + 1 + 18) x rate / 44100)`, so the output is exactly L host samples
+  late and the reported latency a whole number: 18 / 59 / 118 samples at 44.1 / 48 / 96 kHz (0 / 40 / 79 with the master
+  off). Checked (ctest `plugin-master`): a GND-IM impulse lands on the same engine frame on the main bus, a track bus and
+  both sends; with the master on the track and send buses are the master-off render's sample for sample; 48 and 96 kHz
+  are the 44.1 kHz master render through the converter (max difference 0); the master DSP compiles no JIT block on a
+  live callback (672 before and after a 4.5 s render; the first live callback after an OS load takes ~250 µs). Off: the
+  master pass is bypassed (`masterBypass`), the old path exactly.
+- **Latency:** 0 samples at 44.1 kHz, 40 at 48 kHz, 79 at 96 kHz (the resampler), reported to the host; with the master
+  effects on (the default) 18 / 59 / 118 (their dry path's 18 engine frames and the resampler, as one delay).
 - **No heap allocation on the audio thread** (increment 0014, ctest `plugin-rt`), JUCE's MIDI handling included, except
   dsp56300's JIT compiling a voice-program block the first time the program reaches it (~500 blocks, ~5900 mallocs,
   in the first dozen callbacks after an OS load; a new machine or a rare path compiles a few more later). Before 0014
@@ -204,27 +224,36 @@ there has been no Intel hardware. Once a real Intel Mac has run the full ctest, 
 - **Engine rate 44.1 kHz**, the hardware's; other host rates go through Monomodule's band-limited resampler.
 - **Buses:** Main (stereo) + Track 1-16 (mono, off by default) + Reverb send + Delay send (stereo). A track on its own
   bus leaves the dry main mix but still feeds the sends; never use `HostModel::setRouting` (the hardware's outputs A-F
-  land in `Mixer::Output::frame`, which no bus plays) - use the processor's `setTrackOutput`.
+  land in `Mixer::Output::frame`, which no bus plays) - use the processor's `setTrackOutput`. With `master_fx` on (the
+  default) Main is the master section's output and the track and send buses (the dry sends, before the master) are
+  delayed 18 engine frames to stay in step with it; the latency includes them. Off: the dry mix, no delay.
 - **MIDI note map:** the hardware maps tracks 1-16 to the white keys from C2 (36 38 40 41 43 45 47 48 50 52 53 55 57
   59 60 62; MD manual appendix B). That is the default; `note_map` = chromatic gives 36-51 and 0-15 together (the MPC
   port's conventions). `params::trackForNote` / `noteForTrack` in `src/plugin/one/OneParams.h` are the one place.
-- **Host parameters:** 500, raw 0-127 integers with the hardware's names, ids = the MPC port's keys
+- **Host parameters:** 533, raw 0-127 integers with the hardware's names, ids = the MPC port's keys
   (`track0_machine`, `track0_syn1` ... `track0_level`, `track0_lfo_shp1` ..., `tempo`, `midi_channel`, `accent`,
-  `note_map`), groups T1-T16 + Global, append-only once released. SYN names follow the machine. A machine change gives
-  the engine the machine's SYN defaults at once; the SYN parameters follow on the message thread (30 Hz timer) and the
-  host is told names changed. Restore order: machine before SYN.
-- **State:** schema 2 = all parameters + the current kit as a kit dump (`encodeKit(parametersToKit())`), no OS path.
-  The loaded `md::library::Kit` is the canonical in-memory form.
+  `note_map`), then ours for the master effects (`master_fx`, `fx_rev_dvol` .. `fx_rev_lev`, `fx_echo_time` ..
+  `fx_echo_lev`, `fx_eq_lf` .. `fx_eq_gain`, `fx_dyn_atck` .. `fx_dyn_mix`, in the kit's order), groups T1-T16 + Global
+  + Master FX (sub-groups REV, ECHO, EQ, DYN), append-only once released. SYN names follow the machine. A machine change
+  gives the engine the machine's SYN defaults at once; the SYN parameters follow on the message thread (30 Hz timer) and
+  the host is told names changed. Restore order: machine before SYN. The machine parameters are meta parameters (AU
+  `IsGlobalMeta`, increment 0019: `auval -oop` requires it of a parameter that rewrites others); no other one is.
+- **State:** schema 3 = all parameters + the current kit as a kit dump (`encodeKit(parametersToKit())`), no OS path.
+  The loaded `md::library::Kit` is the canonical in-memory form. A schema 2 state (no master parameters) restores the
+  init kit's master bytes and `master_fx` on: the session was made without the master, so it gets the plain settings
+  and not those of the kit dump it carries (decision 7 of increment 0009).
 - **Kits:** `src/core/md/library` decodes and re-encodes `$52` kit messages byte for byte (all 64 of the preset file
   round-trip). Routing is not in a kit (it is in the `$50` global dump); free slots are kits whose first name byte is
   `$7f`. The master-effect blocks are four blocks of 8 bytes in the OS's own order (reverb, echo, EQ, dynamix; the names in
   `MdSysex.h` are confirmed by what the OS does with each byte, increment 0009); the engine runs them
-  (`Kit::masterFx.bytes()` into `HostModel::setMasterFx`, which `applyKit` does not do yet). Kits live in
-  `~/Library/Application Support/Moduledrum/Machinedrum/kits/`, one bank per file.
+  (`Kit::masterFx.bytes()` into `HostModel::setMasterFx`; the library's `applyKit` leaves them out so that the engine's
+  dry tests stay as they are, the plugin's `loadKit` sets them through its parameters and primes the master). Kits live
+  in `~/Library/Application Support/Moduledrum/Machinedrum/kits/`, one bank per file.
 - **Editor:** everything inside the LCD is drawn on a 1-bit canvas with the OS file's own fonts and dials (nothing
   firmware-derived is committed; a built-in stand-in face is used without an OS). Layout: SYN | AMP/EFX over ROUTE |
-  LFO per track, a 16-track strip, a GLOBAL tab (mixer, settings, kit browser). The artwork reader trusts the OS 1.63
-  addresses only after checking the ColdFire section's size and hash.
+  LFO per track, a 16-track strip, a GLOBAL tab (mixer, settings with the MASTER on/off switch, kit browser), a MASTER
+  tab (ECHO | REV over EQ | DYN: the hardware's page order, while the parameters keep the kit's storage order). The
+  artwork reader trusts the OS 1.63 addresses only after checking the ColdFire section's size and hash.
 - **The processor must never take the engine lock from the message thread for display** (the old status line did, and
   the audio thread dropped blocks); the editor reads atomics.
 - **Packaging:** releases are arm64 until the x64 JIT has run on real Intel hardware (the universal build exists and is opt-in; its JIT is fixed and lockstep-clean under Rosetta). The build
@@ -263,14 +292,12 @@ verification of their claims.
   `.github/workflows/build.yml` builds and tests on an Apple Silicon runner and uploads the bundles; the README has
   "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the checks' shared temp
   folders (increment 0020), an Intel-hardware run before the default release becomes universal, loading the packaged
-  build in a DAW, and the owner's certificates.
-- **0009 Master effects.** The Machinedrum's master section (rhythm echo, gate box/reverb, master EQ, dynamix) runs on
-  the mixer DSP (DSP1). **Steps 1-3 (engine) are done**: DSP1's own master pass runs on a second emulated DSP behind the
-  mixer, parameterised by the OS's own code (see "Master effects, engine side" above; the increment holds the research, the
-  design and the verification output). **Steps 4-6 remain**: the plugin and the editor. Kit master bytes into the
-  host parameters (32 integers 0-127, state schema 3), `master_fx` on/off, the master output replacing the main bus
-  (18 frames of alignment for the other streams, latency and tail), and four MASTER `KnobPage`s. Until then the plugin
-  still puts the reverb and delay sends on their own buses and ignores a kit's master blocks.
+  build in a DAW, and the owner's certificates. `auval -oop` now passes too (increment 0019, the machine parameters'
+  meta flag; checked on a scratch copy under another id).
+- **After 0009 (master effects, done and archived)**, optional: the idle skip of the master pass (it runs every block:
+  echo and reverb feedback, a free-running modulation phase) belongs with 0013; a C++ translation (B, with
+  `tests/Dsp1Reference` as the oracle) only if RAM or CPU ever ask for it; the control machines (CTR-RE/GB/EQ/DX, which
+  drive the master parameters from a track) are not modelled; the x64 JIT has never run DSP1's program.
 - **0006 ROM machines and factory kits** need a flash image from a real Machinedrum UW; the MPC port's `tools/mdkits`
   shows how to extract the sample memory and the 16 factory kits by booting the emulated machine.
 - Not modelled at all: the sequencer (patterns, songs, parameter locks, trigger groups), audio input (INP machines),

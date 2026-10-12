@@ -547,7 +547,7 @@ change to the program's modes is not possible (it is the OS's code). Not done.
 - `EngineT` defaults the master section on; `md-hash` (except `MD_MASTER`), `md-kits` and the sweep build the engine without it. A
   plugin that constructs `Engine(fw, os)` now gets the second DSP (+90 MB, +55 ms, +12 us a block) whether it uses `Output::master` or not.
 
-## Remaining (plugin side: steps 4-6), with what the engine gives you
+## What the engine gave the plugin side (written before steps 4-6; they are done, section 11)
 - **Apply a kit's master bytes**: `applyKit` does not (it would move nothing dry, but the plugin has its own parameter path): per
   kit load `for i in 0..31: host.setMasterFx(i, kit.masterFx.bytes()[i])`, then `engine.primeMaster()` to start at the kit's
   settings without the glide (the hardware glides on a kit change, as it does on a knob turn; `primeMaster` also snaps the echo's
@@ -574,6 +574,141 @@ change to the program's modes is not possible (it is the OS's code). Not done.
   (a C++ translation; with `Dsp1Reference` as oracle it is still possible, and RAM is no longer the argument for it: the
   master DSP is 90 MB + its JIT chains), the x64 JIT on DSP1 (never run), the README's feature list.
 
+## 11. Plugin side, implemented (steps 4-6 and 9b; 2026-10-12, branch `worktree-agent-a7625381f929937c1`)
+Sections 6 (decisions 4-8) and 7 (steps 4-6) were done as specified, with increment 0019 (the machine parameters' meta
+flag) alongside. The engine (`src/core`) was not changed: its API had everything (`setMasterFx`, `primeMaster`,
+`masterBypass`, `Output::master`, `master::kDryLatency`, `compiledBlocks`, `library::MasterFx::bytes()/setBytes()`).
+
+### What exists
+- `OneParams.h`: after the 4 globals, group "Master FX" (id `MasterFX`): `master_fx`, then the 32 bytes in the kit
+  dump's order in sub-groups REV, ECHO, EQ, DYN (ids `MasterFXREV` ...): `fx_rev_dvol fx_rev_pred fx_rev_dec fx_rev_damp
+  fx_rev_hp fx_rev_lp fx_rev_gate fx_rev_lev`, `fx_echo_time fx_echo_mod fx_echo_mfrq fx_echo_fb fx_echo_filtf
+  fx_echo_filtw fx_echo_mono fx_echo_lev`, `fx_eq_lf fx_eq_lg fx_eq_hf fx_eq_hg fx_eq_pf fx_eq_pg fx_eq_pq fx_eq_gain`,
+  `fx_dyn_atck fx_dyn_rel fx_dyn_trhd fx_dyn_rtio fx_dyn_knee fx_dyn_hp fx_dyn_outg fx_dyn_mix`; names `REV DVOL` ..
+  `DYN MIX`, `MASTER FX`. 533 parameters (index 500 = `master_fx`, 501-532 the bytes). `kMasterPageBlocks` = the
+  editor's page order (echo, reverb, EQ, dynamix).
+- `MdOneProcessor`: `masterParameter(i)`, `masterOnParameter()`, `setMasterFx(i, v)` / `masterFx(i)`, `setMasterOn` /
+  `masterOn`, `masterActive()` (on and the engine has the section), `conversionLatency()` (now the whole reported
+  latency of the current mode), `masterCompiledBlocks()` (tests), `kMasterLatency`, `kMasterTailSeconds` = 6,
+  `kStateSchema` = 3. `defaultKit()` takes its master block from `master::kDefaultParams`.
+  - Parameters -> engine: `applyParameters` passes changed bytes to `HostModel::setMasterFx` every block, with
+    `master_fx` off too (the DSP stands, its words stay current, switching on plays what the knobs show).
+  - Prime: `loadKit` (also `loadDefaultKit`), `setStateInformation` and `loadEngine` set an atomic flag after the
+    parameters; `processBlock` consumes it after `applyParameters` and the tempo and calls `EngineT::primeMaster()`. On the
+    audio thread: it allocates nothing (`plugin-rt`) and adds ~65 us to one callback (`plugin-master`).
+  - Audio path: per host block `m_masterMode = master_fx && hasMaster()`, `masterBypass = !m_masterMode`. In
+    `renderEngineBlock` every stream but the main pair (sends, track buses) goes through an 18-frame delay line, fed in
+    both modes; in master mode those streams are played delayed and the main pair is `Output::master`. The resampler
+    reads in master mode at engine time `(m - L) x 44100 / rate + 18` with `L = ceil((H + 1 + 18) x rate / 44100)` (H = 35,
+    the kernel's half length), so the output is the sound exactly L host samples late: the reported latency is a whole
+    number, 18 / 59 / 118 at 44.1 / 48 / 96 kHz (0 / 40 / 79 off). At 44.1 kHz nothing is converted and the latency is
+    the 18 frames.
+  - Latency reporting: `prepareToPlay`, `loadEngine`, a restored state and any message-thread change of `master_fx`
+    (its own parameter class, `MasterOnParam::valueChanged`) call `updateLatency()`; a change from another thread (host
+    automation) is picked up by the processor's 30 Hz timer. `getTailLengthSeconds()` is 6 s while the master is active.
+  - Kits: `kitToParameters` sets the 32 bytes (`Kit::masterFx.bytes()`), `parametersToKit` writes them back
+    (`setBytes`), keeping a kit's byte where the parameter holds its clamped value, as for the other fields.
+  - State schema 3: the parameters (with `master_fx` as 0/1) and the KIT as before. A schema 2 state restores the init
+    kit's master bytes and `master_fx` on (decision 7 taken literally; a schema 2 state's KIT does carry its kit's master
+    bytes, which that session never heard: using those instead would be one line in `setStateInformation`).
+  - The loadEngine warm-up also checks that `Output::master` is silent.
+- Editor (`OneEditor.{h,cpp}`): a MASTER tab in the strip after GLOBAL (`TrackStrip::kMaster`); `OneView::showMaster()`,
+  `masterShown()`, pages `Echo Rev Eq Dyn` (`OneView::kMasterPages`) placed in the track pages' 2x2: ECHO | REV over
+  EQ | DYN, titled ECHO, REV, EQ, DYN, a header block MASTER; the cells are dials with the hardware's labels; the EQ's
+  LG, HG and PG show raw - 64 (flat at 64, where the OS's parameter code branches, section 1.3), the rest raw. The titles
+  carry an OFF badge while `master_fx` is off. GLOBAL's bottom row: MASTER (the OFF/ON switch icon, `Icons::Toggle`;
+  a drag of 20 px flips it, a click lists OFF/ON, a double-click resets it to ON) in the last cell; INIT KIT over EXPORT
+  across the other three, which share one frame (`KnobPage::joinLeft`). Strip: GLOBAL 39 px and MASTER 42 px (their
+  names in bold: 35 and 39 px), the 16 track keys in the remaining 204 px, 13 px for tracks 10-16 (a two-digit number
+  is 9 px in bold), 12-13 for 1-9 (was GLOBAL 45 and 15 px per track).
+- Checks (`src/plugin/Check.cpp`): new `--check-master` = ctest `plugin-master` (below); `--check-render` and
+  `--check-state` run with `master_fx` off (`RenderOptions::masterFx`, default false) and check the master layout, the
+  kits' master bytes, schema 3 and schema 2; `--check-rt` adds master edits, a kit load (prime) and master off/on;
+  `--bench` runs the processor with the master on at the three rates and off at 44.1 kHz; `--check-editor` and
+  `--snapshot` cover the MASTER tab.
+
+### Acceptance, as recorded (OS 1.63, kits `MD_presets_1_50.syx`, M-series Mac, JIT build unless said)
+Step 4:
+- `plugin-state`: 533 parameters, ids in order (`master_fx`, `fx_rev_dvol` .. `fx_dyn_mix`), names, ranges 0-127, defaults
+  = the init kit's bytes, groups T1..T16, Global, Master FX (MASTER FX + REV, ECHO, EQ, DYN of 8); every kit's 32 master
+  bytes are in the parameters after `loadKit` and back in `parametersToKit` (64 kits, 16 different master settings); all
+  64 kits still export byte for byte; an edit of echo MFRQ shows in the export, the other blocks unchanged; a schema 3
+  session (master_fx off, echo MOD 5, dynamix MIX 64) restores every parameter and the same state bytes; the same state
+  as schema 2 (500 PARAMs) restores the init kit's master bytes and master_fx on. **`da62047690565e38` holds** with the
+  master off (= `applyKit` on the engine after 16 warm-up blocks; `f5c618b7df5550fa` without them), also after the state
+  round trip.
+Step 5 (`plugin-master`; `plugin-render` keeps **`a28b9dc178776939`** and **`14291ff9302212d4`** with the master off):
+- master_fx on by default: latency 18 at 44.1 kHz, tail 6 s; off: 0 and 0; 48 kHz 59 (off 40), 96 kHz 118 (off 79).
+- The first live callback after an OS load (512 samples, 16 engine blocks, nothing playing): 244 us (median of the next
+  64: 241 us); the master DSP's 672 compiled JIT blocks unchanged, and unchanged over the whole regression render: the
+  engine's warm-up compiled them; the processor's 16 warm-up blocks run the master too (and its output is silent).
+- **Master-on regression hashes: chromatic `ece6201f17cf1b81`, white keys `7fd32e31f89ea574`** (peak -5.47 dBFS; the dry
+  render peaks at -2.86); 61-sample host blocks give the same samples. Identical on the interpreter build
+  (`-DMD_USE_JIT=OFF`), with every other `plugin-master` check.
+- Impulse alignment: "an impulse triggered at frame 1007 lands at frame 1029 (engine block boundary + the voice) on the
+  main bus L/R (1029/1029), track 2's bus (1029), the reverb send (1029) and the delay send (1029) with the master on, and
+  on the dry main bus with it off (1029)" (GND-IM on tracks 1 and 2, DEL and REV 127, track 2 on its own bus).
+- With every bus on (tracks 1 and 10 on their own): the 16 track buses and both send buses with the master on are the
+  master-off render's sample for sample (20 channels) once the reported latency is taken off.
+- 48 and 96 kHz with the master on: the 44.1 kHz master render through the converter, max difference 0.000000000 over
+  215 666 / 431 332 samples, latency 59 / 118 taken off.
+- Reverb LEV 0 and EQ GAIN 64 change the master render (`cf4637dbb16fdcd6`) and not the dry one (`a28b9dc178776939`).
+- master_fx switched 7 times while playing: the reported latency follows (0 18 0 18 0 18 0), no fault; a kit load primes
+  the master in the next callback: at most ~454 us over 4 loads against a 389 us median before (256 samples, 5805 us of
+  budget; the interpreter build 1862 against 1790 us).
+- **Kit 0 (TRX) with the master on: `288d02a442ac6b0b`**, the same as the engine's master output with `applyKit`, the
+  kit's master bytes and `primeMaster` after 16 warm-up blocks, the sends 18 frames behind it (`directKitTestMaster`).
+- `plugin-rt`: 0 allocations outside the JIT at 44.1/64, 48/480 (every bus), 96/256, 44.1/1024 (every bus), with the
+  master edits, a kit load (prime) and master off/on in the sequence; the second pass compiles nothing.
+- Bench (`md-plugin-check --bench 20`, three runs, load average 3.5-5, another process spinning one core in the second):
+
+  | | run 1 | run 2 | run 3 |
+  |---|---|---|---|
+  | engine alone (with the master) | 8.8 % | 9.0 % | 8.9 % |
+  | processor 44.1 kHz, master on | 8.8 %, 0 of 13091 over | 9.0 %, 1 of 13091 over (max 1619 us, 99.9 % 280 us) | 8.9 %, 0 over |
+  | processor 48 kHz, master on | 9.1 %, 0 over | 9.1 %, 0 over | 9.1 %, 0 over |
+  | processor 96 kHz, master on | 9.4 %, 0 over | 9.2 %, 0 over | 9.3 %, 0 over |
+  | processor 44.1 kHz, master off | - | 7.2 %, 0 over | 7.2 %, 0 over |
+
+  99.9th percentiles 150-330 us against budgets of 1451 / 1333 / 667 us. The one callback over budget came with the
+  engine-alone reference's worst block at 549 us in the same run (it reads no parameter): preemption, not the master
+  (its live block is 10-14 us at p99, section 10).
+Step 6 (`plugin-editor`, `--snapshot`):
+- The MASTER key shows ECHO | REV over EQ | DYN with the hardware's labels (TIME MOD MFRQ FB FILTF FILTW MONO LEV; DVOL
+  PRED DEC DAMP HP LP GATE LEV; LF LG HF HG PF PG PQ GAIN; ATCK REL TRHD RTIO KNEE HP OUTG MIX), every one of the 32
+  cells turns its own byte and no other (a 20 px drag: +-16); a host change moves a knob; LG 64 shows 0, PG 70 +6;
+  GLOBAL's MASTER switch: OFF (the master pages say OFF), dragged up ON in one gesture (latency 18, badges gone), down off
+  (latency 0), a double-click back to ON; a track's key leaves the tab; every page renders.
+- Snapshots reviewed (100 %, 200 %, and 50 %): master, master-off, kit-master (FRANSISCO: echo TIME 16, FB 28, a gated
+  reverb GATE 0 / LP 57, the compressor ATCK 49 REL 105 TRHD 66 RTIO 99 KNEE 30 HP 71 OUTG 14), global, track,
+  unconfigured (the stand-in face). Fixed after looking: MASTER fell back to the small face in a 38 px key (now 42 px);
+  the two-digit track numbers were cramped on 12 px keys (now 13 px for 10-16); the cell dividers showed through the
+  gaps between INIT KIT and EXPORT (the three cells now share one frame); EXPORT sat a pixel low. The stand-in face's
+  two-digit numbers use the small face, as before. No PNG committed.
+Other:
+- ctest: 16 of 16 (the 15 before + `plugin-master`); `md-hash` `04ef1db4fe767721`.
+- Standalone (scratch `MD_SETTINGS_DIR`): started with the OS, ran 28 s (4 % CPU at 14 s, RSS 400 MB), quit on SIGTERM; its
+  settings file unchanged. The window was not looked at; the snapshots stand in.
+- auval (increment 0019, on a scratch copy `aumu Mdz2 Mdrm` with this tree's 533 parameters): `-v`, `-oop -v`, `-strict -v`,
+  `-oop -strict -v` all AU VALIDATION SUCCEEDED; the copy was removed again.
+
+### For a human, by ear
+- The master section against the dry path (`master_fx` off): it is not level-neutral (the cleared kit's dynamix, a 0 dB
+  limiter with OUTG 0, takes quiet material down ~2.6 dB; EQ GAIN 127 alone is +5.8 dB), so A/B at matched loudness.
+- The preset kits' master settings: their reverb (DVOL, GATE, LEV 96-111), echo (TIME, FB, FILTF/FILTW) and the kits with
+  a working compressor (e.g. FRANSISCO, BOOGIE): do they sound like the hardware's?
+- An echo TIME or tempo change glides (pitch sweep) as on the MD; a kit load does not (primed); turning a master knob
+  glides in over a few ticks.
+- Switching `master_fx` while playing: an audible jump (the output moves by 18 frames and the main bus changes source);
+  a host may only apply the latency change at the next stop.
+- A bounce with the reverb or echo ringing: the 6 s tail.
+
+### Not done / for later
+- Control machines (CTR-RE, CTR-GB, CTR-EQ, CTR-DX) are not modelled (they are not pickable).
+- Step 7b, the master's idle skip, goes with 0013 (the master runs every block: ~2 % of a core even at rest).
+- Step 8 (a C++ translation) stays optional.
+- The x64 JIT has never run DSP1's program; the universal build's master is untested.
+
 ## Tasks
 - [x] Read HANDOFF.md/PROTOCOL.md on DSP1's master section
 - [x] Locate the master code and parameters in section 2 and the OS; decode the 38 words and their sources
@@ -583,11 +718,11 @@ change to the program's modes is not possible (it is the OS's code). Not done.
 - [x] Step 1: `MasterFx` engine stage and its tests (section 10)
 - [x] Step 2: master parameters in `HostModel` (OS pipeline, priming)
 - [x] Step 3: engine integration, `golden-master` hash
-- [ ] Step 4: kits and host parameters
-- [ ] Step 5: plugin audio path (bypass, alignment, latency, tail)
-- [ ] Step 6: editor MASTER pages
+- [x] Step 4: kits and host parameters (section 11)
+- [x] Step 5: plugin audio path (bypass, alignment, latency, tail)
+- [x] Step 6: editor MASTER pages
 - [x] Step 7a: RAM breakdown and trim (192 MB of mlock and 80 MB of ring buffers per DSP removed; the JIT's block chains are the lead left, section 10)
-- [ ] Step 7b: idle skip of the master pass (with 0013)
+- [ ] Step 7b: idle skip of the master pass (moved to 0013)
 - [ ] Step 8 (optional): C++ translation with `Dsp1Reference` as oracle
 - [x] Step 9a: docs: `docs/DEVELOPMENT.md`, the `MdSysex.h` and `KitApply.h` comments
-- [ ] Step 9b: the README's feature list, once the plugin has the master
+- [x] Step 9b: the README's feature list, once the plugin has the master (and `docs/DEVELOPMENT.md`)

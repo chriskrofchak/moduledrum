@@ -15,7 +15,7 @@ Motorola DSP56300 and the OS's own machine code in an emulated ColdFire, on the 
 > contains no Elektron software. To make sound it needs the Machinedrum OS file, which you download from Elektron
 > yourself (see [Getting the OS file](#getting-the-os-file)).
 
-**Status:** early development. It plays, it saves, and the editor is complete, but the master effects and the ROM
+**Status:** early development. It plays, it saves, the editor is complete and the master effects run, but the ROM
 machines are still missing (see [Known limitations](#known-limitations)). There is an installer and a CI build now, but no
 download is published yet.
 
@@ -23,12 +23,19 @@ download is published yet.
 
 | | Type | What it does |
 |---|---|---|
-| **Moduledrum** | Instrument (AU, VST3, standalone) | All 16 Machinedrum tracks in one instance, with a main mix, 16 track outputs and the reverb and delay sends as separate outputs. MIDI notes trigger tracks 1-16 as on the Machinedrum (the white keys from C2: 36 38 40 41 43 45 47 48 50 52 53 55 57 59 60 62), or chromatically (36-51 and 0-15) with the NOTE MAP parameter. The editor recreates the Machinedrum's LCD pages. |
+| **Moduledrum** | Instrument (AU, VST3, standalone) | All 16 Machinedrum tracks in one instance, with a main mix through the Machinedrum's master effects (rhythm echo, gate box reverb, master EQ, dynamix), 16 track outputs and the reverb and delay sends as separate outputs. MIDI notes trigger tracks 1-16 as on the Machinedrum (the white keys from C2: 36 38 40 41 43 45 47 48 50 52 53 55 57 59 60 62), or chromatically (36-51 and 0-15) with the NOTE MAP parameter. The editor recreates the Machinedrum's LCD pages. |
 | **Command-line tools** | `md-hash`, `md-machines`, `md-kits`, `md-plugin-check` | An audio hash of a fixed 16-track pattern to compare builds, the OS's machine table, the kits of a `.syx` dump (list, render one to WAV), and headless checks and snapshots of the plugin. |
 
-Every knob of the 16 tracks (machine, the SYN, EFFECTS and ROUTING pages, LEV, the LFO page) is a host parameter with
-the hardware's raw values and names, and the whole sound is saved with the project. Kits import from and export to
-Machinedrum kit dumps (`.syx`) byte for byte.
+Every knob of the 16 tracks (machine, the SYN, EFFECTS and ROUTING pages, LEV, the LFO page) and of the master effects
+is a host parameter with the hardware's raw values and names, and the whole sound is saved with the project. Kits
+import from and export to Machinedrum kit dumps (`.syx`) byte for byte, their master effects included.
+
+The master effects are the Machinedrum's own: its mixer DSP's master program runs in a second emulated DSP behind the
+mix, fed by the OS's own parameter code, so a kit sounds as it does on the hardware (and, as there, the master is not
+level-neutral: the dynamix and the EQ's GAIN act on the dry mix too). The main output is the master section's; the
+track outputs and the send outputs (the sends as they leave the mix, before the effects) are delayed to stay in step
+with it, and the plugin reports that as 18 samples of latency at 44.1 kHz. The **MASTER FX** parameter (MASTER on the
+GLOBAL page) switches the section off: the main output is then the dry mix, with no added latency.
 
 The window can be resized from 50% to 200% with its proportions kept: drag the grip in the bottom-right corner. Every
 Moduledrum window shares one size setting.
@@ -48,12 +55,17 @@ The LCD is drawn with the OS file's own fonts and dials, in the layout of Machin
   is a knob on its host parameter: drag up or right to turn it up (shift: finer), use the mouse wheel (shift: one step),
   click the value to type it (or, for a named value such as LFO TRACK or UPDTE, to pick it from a list), double-click
   the dial for its default. Values are the raw ones the hardware shows (bipolar ones signed: PAN -1, EQG +20).
-- **Strip** (bottom): GLOBAL and tracks 1-16 with their machines. Click to select; click the selected track again to
-  play it. Tracks flash when they play.
+- **Strip** (bottom): GLOBAL, MASTER and tracks 1-16 with their machines. Click to select; click the selected track
+  again to play it. Tracks flash when they play.
 - **Machine picker:** the OS's machines by group. Greyed machines make no sound in this engine (INP, MID, CTR, RAM,
   and ROM, which needs samples from a real unit); a kit that uses one shows it, marked SILENT.
 - **GLOBAL:** MIXER (the 16 tracks' LEV), TEMPO (used when the host gives none), CHAN (MIDI channel), NOTES (note map),
-  ACCNT (accent), INIT KIT, EXPORT (the current kit as a Machinedrum kit dump `.syx`), and KITS, the kit browser.
+  ACCNT (accent), MASTER (the master effects on or off), INIT KIT, EXPORT (the current kit as a Machinedrum kit dump
+  `.syx`), and KITS, the kit browser.
+- **MASTER:** the master effects' four pages, in the hardware's order and with its labels: ECHO (rhythm echo: TIME MOD
+  MFRQ FB FILTF FILTW MONO LEV), REV (gate box reverb: DVOL PRED DEC DAMP HP LP GATE LEV), EQ (LF LG HF HG PF PG PQ
+  GAIN) and DYN (dynamix: ATCK REL TRHD RTIO KNEE HP OUTG MIX). A kit brings its own settings; turning a knob glides to
+  the new value as the hardware does. The pages say OFF while MASTER is off.
 - **Kits:** every `.syx` in `~/Library/Application Support/Moduledrum/Machinedrum/kits/` is a bank of kits (free slots
   are hidden); click a bank, then a kit to load it. Drop a `.syx` (a kit dump from C6, Transfer or an MD backup) anywhere
   on the editor to copy it there. FOLDER opens the folder; the browser notices files added or changed there.
@@ -225,8 +237,9 @@ MD_OS_SYX=/path/to/Elektron_SPS1-1UW_OS1.63.syx ctest --test-dir build --output-
 
 Without the OS file, the tests that run the engine are reported as skipped and the rest still run (that is what CI does).
 `MD_KITS_SYX=/path/to/a kit dump .syx` adds the kit cases: kit files decoded and re-encoded byte for byte, a kit through
-the plugin's parameters and saved state, and the editor's kit browser. `plugin-editor` drives the editor headlessly;
-`plugin-rt` checks that `processBlock` makes no heap allocation (macOS);
+the plugin's parameters and saved state, and the editor's kit browser. `plugin-master` checks the master effects in
+the plugin (their hashes, the latency, every output in step with the main one); `plugin-editor` drives the editor
+headlessly; `plugin-rt` checks that `processBlock` makes no heap allocation (macOS);
 `md-plugin-check --snapshot <dir>` renders its pages to PNG for review (they show artwork read from your OS file, so
 don't commit them). Run one `ctest` at a time: the plugin checks keep their settings in a folder named after the check,
 so two runs at once (also from two build directories or two worktrees) delete each other's and fail or crash.
@@ -250,6 +263,9 @@ at the first register that differs.
 - **Effects and mix.** `TrackFx` and `Mixer` are the mixer DSP's (DSP1) per-track chain (AMD, EQ, filter, SRR,
   distortion) and its mix (pan law, VOL, the reverb and delay sends, the individual outputs), translated to native C++
   and bit-exact with the DSP code. Their tables are read from the OS file.
+- **Master effects.** `MasterFx` runs DSP1's own master section (rhythm echo, gate box reverb, master EQ, dynamix),
+  unchanged, on a second emulated DSP56300 behind the mix; `HostModel` turns a kit's 32 master bytes into the 38 words it
+  reads with the OS's own smoothing and parameter code, one group per control tick as on the hardware.
 - **Plugin.** `src/plugin` holds the plugin. The engine runs at 44.1 kHz inside `processBlock`; at other host rates
   Monomodule's band-limited resampler converts it. `src/core/md/library` decodes and re-encodes Machinedrum kit dumps.
   The editor draws the LCD with the fonts and dials from your OS file. Without an OS file it falls back to a built-in
@@ -260,16 +276,17 @@ The engine in `src/core/md` is sd88me's, vendored from Machinemodule for MPC OS
 
 ## Known limitations
 
-- **No master effects yet.** The Machinedrum's master section (rhythm echo, gate/reverb, EQ, dynamix) runs on the
-  mixer DSP and is not emulated. The reverb and delay sends come out as their own outputs, ready for your own
-  effects.
+- **Master effects:** the control machines (CTR-RE, CTR-GB, CTR-EQ, CTR-DX), which drive them from a track, are not
+  modelled. The section runs every block whether anything plays or not, and its second emulated DSP takes about
+  215 MB more memory per instance (an engine is ~300 MB with it, ~90 MB without; most of it is the JIT's tables).
 - **ROM machines and the factory kits** need the sample flash of a real unit, which is not part of the OS file. INP,
   MID, CTR and RAM machines are silent too.
 - **No sequencer.** Moduledrum plays the 16 tracks from MIDI notes. Patterns, songs, parameter locks and trigger groups
   are not modelled.
-- **CPU.** The emulated DSP runs on dsp56300's JIT, bit-exact with its interpreter. On Apple Silicon, 16 tracks cost
-  about 5% of one core on `md-hash`'s sparse pattern and about 7% with every track retriggered 8 times per beat
-  (the interpreter: 18% and 32%). An idle instance still runs the whole DSP every block.
+- **CPU.** The emulated DSPs run on dsp56300's JIT, bit-exact with its interpreter. On Apple Silicon, 16 tracks cost
+  about 5% of one core on `md-hash`'s sparse pattern and about 7% with every track retriggered 8 times per beat, and
+  the master effects add about 2% (9% in all; the interpreter: 18% and 32% without them). An idle instance still runs
+  the whole DSP every block.
 - **macOS only** for now. Releases are arm64 (Apple Silicon); the x86_64 slice of a universal build is experimental: the
   x64 JIT leaves the Z flag set after one LSL loop (the audio is unaffected so far) and no Intel Mac has run it, see
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
