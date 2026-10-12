@@ -1,0 +1,13 @@
+.DS_Store
+build*/
+out/
+*.wav
+.vs/
+.vscode/
+.idea/
+CMakeUserPresets.json
+
+# Local development files, not part of the project
+CLAUDE.md
+.claude/
+/resources/

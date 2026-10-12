@@ -1,0 +1,6 @@
+[submodule "ext/dsp56300"]
+	path = ext/dsp56300
+	url = https://github.com/sd88me/dsp56300.git
+[submodule "ext/mc68k"]
+	path = ext/mc68k
+	url = https://github.com/joelanders/mc68k-md-mm.git
