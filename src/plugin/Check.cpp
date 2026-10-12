@@ -60,7 +60,9 @@
 //       for the range, shift 8x finer), the wheel, a typed value (clamped; bipolar) and a double-click (the default) set
 //       its parameter, one gesture each; the machine picker refuses greyed machines, sets the machine and the SYN page
 //       relabels with the machine's defaults (also when the host changes it); the LFO page names its destination after
-//       that track's machine; triggered tracks flash; the GLOBAL tab's faders, tempo, channel and note map. With a kit
+//       that track's machine; triggered tracks flash; the GLOBAL tab's faders, tempo, channel and note map; the MASTER
+//       tab's four pages (the hardware's order and labels, every cell on its master byte) and GLOBAL's MASTER switch
+//       (.clew increment 0009). With a kit
 //       snapshot (--kits, else $MD_KITS_SYX): dropped on the editor it is copied into the kit folder and listed (its used
 //       kits only), a click on kit 4 loads it, EXPORT writes the kit, the folder is rescanned when files change. Exit
 //       code 77 (skipped) without an OS file, once the OS-free part has passed. Uses a temporary MD_SETTINGS_DIR.
@@ -69,10 +71,11 @@
 //       The editor rendered offscreen to PNG, for review without a window: unconfigured.png and wrong-file.png (the
 //       built-in stand-in face) and, with an OS file, at the base size and at 200 % (<name>-200.png): track (track 1's
 //       four pages, an LFO set up, track 3 flashing), picker (the machine picker open), edit (a value being typed),
-//       global-empty (the GLOBAL tab, no kit file yet) and, with a kit snapshot, global (the snapshot in the kit
-//       folder, its kit 4 loaded from the browser) and kit-track (track 5 of that kit); then track-50.png. Also checks
-//       the resizing: 50-200 % of the base size, aspect ratio locked, the size left by the user kept as a shared
-//       setting. Never commit these PNGs: they show artwork read from the OS file.
+//       global-empty (the GLOBAL tab, no kit file yet), master (the MASTER tab: the default kit's master effects; and
+//       master-off.png, switched off) and, with a kit snapshot, global (the snapshot in the kit folder, its kit 4 loaded
+//       from the browser), kit-track (track 5 of that kit) and kit-master (its master effects); then track-50.png.
+//       Also checks the resizing: 50-200 % of the base size, aspect ratio locked, the size left by the user kept as a
+//       shared setting. Never commit these PNGs: they show artwork read from the OS file.
 //
 // The OS file: --fw, else $MD_OS_SYX, else the MD_OS_SYX CMake option.
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -1547,6 +1550,10 @@ int snapshot(const juce::File& outDir, const juce::String& os, const juce::Strin
             v.page(OneView::Effects).valueEditor().setText("99", false);
         });
         shot("global-empty", 1.0, [](OneView& v) { v.showGlobal(); });   // no kit file yet
+        // the MASTER tab: the default kit's master settings (a cleared MD kit's), then switched off (the pages say so)
+        both("master", [](OneView& v) { v.showMaster(); });
+        shot("master-off", 1.0, [&p](OneView& v) { p.setMasterOn(false); v.showMaster(); });
+        p.setMasterOn(true);
         // the user's kit snapshot in the kit folder, its kit 4 loaded from the browser
         const auto kits = kitsFileOf(kitsPath);
         if (kits.isNotEmpty() && juce::File(kits).existsAsFile()) {
@@ -1558,6 +1565,7 @@ int snapshot(const juce::File& outDir, const juce::String& os, const juce::Strin
                 v.kitsPage().loadKit(0, 4);
             });
             both("kit-track", [](OneView& v) { v.selectTrack(4); });   // a track of that kit
+            both("kit-master", [](OneView& v) { v.showMaster(); });     // that kit's master effects
         }
         last = "track";
         shot("status", 1.0, [](OneView& v) { v.setStatusShown(true); });   // MENU > Show Engine Status: the view grows
@@ -1928,13 +1936,90 @@ int checkEditor(const juce::String& os, const juce::String& kitsPath)
         check(kitsPage.browsedBank() == e && kitsPage.loadedKit() == -1, "a click on a bank browses it");
     }
 
-    // Every page renders: the track pages, the picker open, the GLOBAL tab
+    // The MASTER tab (.clew increment 0009): the strip's MASTER key shows the master effects' four pages in the hardware's
+    // order with the hardware's labels, each cell on its master byte (a drag turns that byte and no other one); a host
+    // change moves a knob; the GLOBAL page's MASTER switch turns master_fx, and the master pages say OFF while it is off
+    {
+        using md::plugin::one::TrackStrip;
+        constexpr int kS = md::plugin::one::kScale;
+        view.selectTrack(3);
+        clickAt(strip, (strip.keyArea(TrackStrip::kMaster).getCentre() * kS).toFloat());
+        bool shown = view.masterShown() && !view.globalShown() && strip.selected() == TrackStrip::kMaster && !view.page(OneView::Syn).isVisible()
+                  && !view.page(OneView::Mixer).isVisible() && !view.machineBar().isVisible();
+        for (auto pg : OneView::kMasterPages) shown = shown && view.page(pg).isVisible();
+        static const char* const kTitles[4] = {"ECHO", "REV", "EQ", "DYN"};
+        static const char* const kLabels[4][8] = {{"TIME", "MOD", "MFRQ", "FB", "FILTF", "FILTW", "MONO", "LEV"},
+                                                  {"DVOL", "PRED", "DEC", "DAMP", "HP", "LP", "GATE", "LEV"},
+                                                  {"LF", "LG", "HF", "HG", "PF", "PG", "PQ", "GAIN"},
+                                                  {"ATCK", "REL", "TRHD", "RTIO", "KNEE", "HP", "OUTG", "MIX"}};
+        static constexpr int kBlockOfPage[4] = {1, 0, 2, 3};   // the pages' blocks in the kit's order (reverb, echo, EQ, dynamix)
+        bool labels = true, bound2 = true, turned = true;
+        int cells = 0;
+        juce::StringArray moves;
+        for (int b = 0; b < 4; ++b) {
+            auto& pg = view.page(OneView::kMasterPages[b]);
+            labels = labels && pg.title() == kTitles[b];
+            for (int k = 0; k < 8; ++k) {
+                const int i = kBlockOfPage[b] * 8 + k;
+                labels = labels && juce::String(pg.descriptor(k).label) == kLabels[b][k];
+                bound2 = bound2 && pg.parameter(k) == &p.masterParameter(i);
+                std::array<int, 32> before{};
+                for (int j = 0; j < 32; ++j) before[size_t(j)] = p.masterFx(j);
+                const int v0 = before[size_t(i)], dir = v0 < 64 ? 1 : -1;   // 20 px up (+16) from the lower half, down (-16) from the upper
+                dragCell(pg.cell(k), pg.cell(k).getLocalBounds().getCentre().toFloat(), {0.0f, -20.0f * float(dir)});
+                bool only = p.masterFx(i) == v0 + 16 * dir;
+                for (int j = 0; j < 32; ++j) only = only && (j == i || p.masterFx(j) == before[size_t(j)]);
+                turned = turned && only;
+                cells += only ? 1 : 0;
+                if (k == 0) moves.add(juce::String(kTitles[b]) + " " + kLabels[b][k] + " " + juce::String(v0) + " -> " + juce::String(p.masterFx(i)));
+            }
+        }
+        check(shown && labels && bound2, "the MASTER key shows ECHO | REV over EQ | DYN, the hardware's labels (TIME .. LEV, DVOL .. LEV, LF .. GAIN, ATCK .. MIX), "
+              "each cell on its master byte (ECHO on fx_echo_*, REV on fx_rev_*, ...)");
+        check(turned, "every master cell turns its byte and no other (" + juce::String(cells) + " of 32): " + moves.joinIntoString(", "));
+        auto& eq = view.page(OneView::Eq);
+        p.setMasterFx(17, 64);
+        p.setMasterFx(21, 70);
+        p.setMasterFx(23, 100);
+        check(eq.cellText(1) == "0" && eq.cellText(5) == "+6" && eq.cellText(7) == "100" && juce::roundToInt(eq.cell(7).getValue()) == 100,
+              "a host change moves the knobs; the EQ's gains are shown around their flat 64: LG " + eq.cellText(1) + ", PG " + eq.cellText(5) + ", GAIN " + eq.cellText(7));
+
+        auto& global = view.page(OneView::Global);
+        auto& sw = global.cell(OneView::kMasterCell);
+        p.setMasterOn(false);
+        view.refresh();
+        bool badges = true;
+        for (auto pg : OneView::kMasterPages) badges = badges && view.page(pg).badge() == "OFF";
+        view.showGlobal();
+        const auto offText = global.cellText(OneView::kMasterCell);
+        gestures.begins = gestures.ends = 0;
+        dragCell(sw, sw.getLocalBounds().getCentre().toFloat(), {0.0f, -30.0f});
+        const bool onAgain = p.masterOn() && global.cellText(OneView::kMasterCell) == "ON" && gestures.begins == 1 && gestures.ends == 1;
+        view.refresh();
+        bool cleared = true;
+        for (auto pg : OneView::kMasterPages) cleared = cleared && view.page(pg).badge().isEmpty();
+        dragCell(sw, sw.getLocalBounds().getCentre().toFloat(), {0.0f, 30.0f});
+        const bool offAgain = !p.masterOn() && p.getLatencySamples() == 0;
+        const int offLatency = p.getLatencySamples();
+        sw.mouseDoubleClick(mouseAt(sw, sw.getLocalBounds().getCentre().toFloat(), sw.getLocalBounds().getCentre().toFloat(), {}, 2, false));
+        check(global.parameter(OneView::kMasterCell) == &p.masterOnParameter() && juce::String(global.descriptor(OneView::kMasterCell).label) == "MASTER"
+                  && offText == "OFF" && badges && onAgain && cleared && offAgain && p.masterOn() && p.getLatencySamples() == MdOneProcessor::kMasterLatency,
+              "GLOBAL's MASTER switch: OFF while master_fx is off (the master pages say OFF), dragged up: ON in one gesture (the badges go), down: off (latency "
+              + juce::String(offLatency) + "), a double-click: back to its default, on (latency " + juce::String(p.getLatencySamples()) + ")");
+        clickAt(strip, (strip.keyArea(3).getCentre() * kS).toFloat());
+        check(view.selectedTrack() == 3 && !view.masterShown() && view.page(OneView::Syn).isVisible() && !view.page(OneView::Echo).isVisible(),
+              "a track's key leaves the MASTER tab for that track's pages");
+    }
+
+    // Every page renders: the track pages, the picker open, the GLOBAL tab, the MASTER tab
     view.selectTrack(1);
     const bool trackRenders = renders(*editor);
     view.openMachinePicker(false);
     const bool pickerRenders = renders(*editor);
     view.showGlobal();
-    check(trackRenders && pickerRenders && renders(*editor), "every page renders (a track, the picker, GLOBAL)");
+    const bool globalRenders = renders(*editor);
+    view.showMaster();
+    check(trackRenders && pickerRenders && globalRenders && renders(*editor), "every page renders (a track, the picker, GLOBAL, MASTER)");
     p.removeListener(&gestures);
     editor.reset();
     settingsDir.deleteRecursively();

@@ -13,7 +13,11 @@ constexpr const char* kVersionText = "V" MD_VERSION_STRING;   // the footer's le
 
 // The GLOBAL page's cells that are not raw 0-127 knobs
 constexpr const char* const kNoteMapShort[2] = {"WHITE", "CHROM"};
+constexpr const char* const kOffOn[2] = {"OFF", "ON"};
 constexpr double kTempoMin = 30.0, kTempoMax = 300.0;
+// The master EQ's three gains (LG, HG, PG) are flat at 64 (the OS's parameter code branches there): shown as -64..+63,
+// as a track's EQG is
+constexpr bool masterBipolar(int i) { return i == 17 || i == 19 || i == 21; }
 
 bool typedDisplay(spec::Display d) { return d == spec::Display::Numeric || d == spec::Display::Bipolar; }
 
@@ -313,6 +317,7 @@ void KnobPage::paintCells(LcdCanvas& cv) const
         const auto& c = *m_cells[size_t(k)];
         const auto text = c.text ? cellText(k) : juce::String();
         drawKnobCell(cv, a.getX(), a.getY(), c.d, rawOf(k), isHot(k), c.text ? text.toRawUTF8() : nullptr);
+        if ((m_joined >> k) & 1u) cv.fillRect(a.getX(), a.getY() + 1, 1, a.getHeight() - 1, false);   // its left divider, under the top rule
     }
     cv.dotsV(kLcdW - 1, kGridY, kLcdH - 1);   // grid right edge
     cv.dotsH(0, kLcdW - 1, kLcdH - 1);        // grid bottom edge
@@ -360,6 +365,7 @@ constexpr int kMixNumberY = 14, kMixNameY = 21, kMixFrameY = 28, kMixFrameH = 36
 MixerPage::MixerPage() : KnobPage("MIXER", 16)
 {
     static_assert(MixerPage::kLcdW == OneView::kLcdContentW, "the mixer spans the two pages and their gap");
+    static_assert(TrackStrip::kLcdW == OneView::kLcdContentW, "the strip spans the LCD content");
     for (int k = 0; k < 16; ++k) cell(k).setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
 }
 
@@ -459,13 +465,18 @@ void MachineBar::mouseDown(const juce::MouseEvent&)
 juce::Rectangle<int> TrackStrip::keyArea(int key) const
 {
     if (key == kGlobal) return {0, 0, kGlobalW, kLcdH};
-    return {kGlobalW + key * kCellW, 0, kCellW, kLcdH};
+    if (key == kMaster) return {kGlobalW, 0, kMasterW, kLcdH};
+    // tracks 10-16 (two digits) get 13 px each, tracks 1-9 share the rest (12 or 13 px)
+    constexpr int kWide = 13, kOnes = kTracksW - 7 * kWide;
+    const int x0 = kTracksX + (key < 9 ? key * kOnes / 9 : kOnes + (key - 9) * kWide);
+    const int x1 = key < 9 ? kTracksX + (key + 1) * kOnes / 9 : x0 + kWide;
+    return {x0, 0, x1 - x0, kLcdH};
 }
 
 int TrackStrip::keyAt(juce::Point<int> local) const
 {
     const auto lcd = local / kScale;
-    for (int key = 0; key <= kGlobal; ++key)
+    for (int key = 0; key <= kMaster; ++key)
         if (keyArea(key).contains(lcd)) return key;
     return -1;
 }
@@ -502,18 +513,24 @@ void TrackStrip::paint(juce::Graphics& g)
 {
     LcdCanvas cv(kLcdW, kLcdH);
     const auto& bold = spec::kFontBold8;
-    for (int key = 0; key <= kGlobal; ++key) {
+    // the bold face where it fits the key with a pixel to spare each side, else the small one (the stand-in's wider digits)
+    const auto faceFor = [&bold](const char* s, int w) -> const spec::Font& { return LcdCanvas::textWidth(bold, s) <= w - 3 ? bold : spec::kFontSmall4x5; };
+    for (int key = 0; key <= kMaster; ++key) {
         const auto r = keyArea(key);
         cv.dotsH(r.getX(), r.getRight(), 0);
         cv.dotsV(r.getX(), 0, kLcdH - 1);
         const bool sel = key == m_selected;
         if (sel) cv.fillRect(r.getX() + 1, 1, r.getWidth() - 1, kLcdH - 2, true);
         const bool ink = !sel;   // drawing colour inside the key
-        if (key == kGlobal) { cv.textCentred(bold, "GLOBAL", r.getX() + 1, r.getWidth() - 1, (kLcdH - bold.h) / 2, ink); continue; }
-        // the track's number (the key's legend; the small face where the bold one is too wide, as the stand-in's),
-        // its machine's short name, the trigger bar under it
+        if (key == kGlobal || key == kMaster) {
+            const char* tab = key == kGlobal ? "GLOBAL" : "MASTER";
+            const auto& f = faceFor(tab, r.getWidth());
+            cv.textCentred(f, tab, r.getX() + 1, r.getWidth() - 1, (kLcdH - f.h) / 2, ink);
+            continue;
+        }
+        // the track's number (the key's legend), its machine's short name, the trigger bar under it
         const juce::String num(key + 1);
-        const auto& nf = LcdCanvas::textWidth(bold, num.toRawUTF8()) <= r.getWidth() - 3 ? bold : spec::kFontSmall4x5;
+        const auto& nf = faceFor(num.toRawUTF8(), r.getWidth());
         cv.textCentred(nf, num.toRawUTF8(), r.getX() + 1, r.getWidth() - 1, 2 + (bold.h - nf.h) / 2, ink);
         cv.textCentred(spec::kFontTiny3x5, m_names[size_t(key)].toRawUTF8(), r.getX() + 1, r.getWidth() - 1, 11, ink);
         if (m_flash[size_t(key)] > 0) cv.fillRect(r.getX() + 3, 17, r.getWidth() - 5, 2, ink);
@@ -527,7 +544,7 @@ void TrackStrip::mouseDown(const juce::MouseEvent& e)
 {
     const int key = keyAt(e.getPosition());
     if (key < 0) return;
-    if (key == m_selected && key != kGlobal) {   // the selected track's key again: a pad
+    if (key == m_selected && key < kGlobal) {   // the selected track's key again: a pad
         m_playing = key;
         if (onPlay) onPlay(key, true);
         return;
@@ -643,19 +660,25 @@ OneView::OneView(MdOneProcessor& p) : m_proc(p), m_kits(p, m_library)
     m_artPath = m_proc.firmwarePath();
     loadLcdArt(m_artPath);   // the OS file's faces before anything measures text
 
-    // the LCD: the header, the track pages, the GLOBAL tab's pages, the strip, the picker over them
+    // the LCD: the header, the track pages, the GLOBAL and MASTER tabs' pages, the strip, the picker over them
     addAndMakeVisible(m_machineBar);
     addChildComponent(m_globalTitle);
+    addChildComponent(m_masterTitle);
     addAndMakeVisible(m_kitBox);
     addAndMakeVisible(m_strip);
-    for (auto* c : {(juce::Component*)&m_machineBar, (juce::Component*)&m_globalTitle, (juce::Component*)&m_kitBox})
+    for (auto* c : {(juce::Component*)&m_machineBar, (juce::Component*)&m_globalTitle, (juce::Component*)&m_masterTitle, (juce::Component*)&m_kitBox})
         c->setOpaque(true);
     m_globalTitle.setMachine({}, "GLOBAL");
+    m_masterTitle.setMachine({}, "MASTER");
     m_machineBar.onContentChanged = [this] { resized(); };
     m_kitBox.onContentChanged = [this] { resized(); };
     m_kitBox.onClick = [this] { showGlobal(); };
     m_strip.onPlay = [this](int track, bool down) { playTrack(track, down); };
-    m_strip.onSelect = [this](int key) { if (key == TrackStrip::kGlobal) showGlobal(); else selectTrack(key); };
+    m_strip.onSelect = [this](int key) {
+        if (key == TrackStrip::kGlobal) showGlobal();
+        else if (key == TrackStrip::kMaster) showMaster();
+        else selectTrack(key);
+    };
 
     m_pages[Syn] = std::make_unique<KnobPage>("SYN");
     m_pages[Effects] = std::make_unique<KnobPage>("AMP/EFX");
@@ -663,12 +686,15 @@ OneView::OneView(MdOneProcessor& p) : m_proc(p), m_kits(p, m_library)
     m_pages[Lfo] = std::make_unique<KnobPage>("LFO");
     m_pages[Global] = std::make_unique<KnobPage>("GLOBAL");
     m_pages[Mixer] = std::make_unique<MixerPage>();
+    for (int b = 0; b < params::kMasterBlocks; ++b)   // ECHO, REV, EQ, DYN
+        m_pages[kMasterPages[b]] = std::make_unique<KnobPage>(params::kMasterBlockNames[size_t(params::kMasterPageBlocks[size_t(b)])]);
     for (auto& page : m_pages) addChildComponent(*page);
     addChildComponent(m_kits);
     addChildComponent(m_initKit);
     addChildComponent(m_export);
 
-    // GLOBAL: TEMPO CHAN NOTES ACCNT over INIT KIT and EXPORT (buttons over the blank bottom row)
+    // GLOBAL: TEMPO CHAN NOTES ACCNT over INIT KIT and EXPORT (buttons over the bottom row's first three cells) and
+    // MASTER, the master effects on or off
     auto& global = page(Global);
     auto& tempo = m_proc.tempoParameter();
     global.bind(0, &tempo, cellParam("TEMPO", spec::Display::Numeric, juce::roundToInt((120.0 - kTempoMin) * 127.0 / (kTempoMax - kTempoMin)), 127),
@@ -678,7 +704,22 @@ OneView::OneView(MdOneProcessor& p) : m_proc(p), m_kits(p, m_library)
                 [](double v) { const int c = juce::roundToInt(v); return c == 0 ? juce::String("OMNI") : juce::String(c); });
     global.bind(2, &m_proc.noteMapParameter(), cellParam("NOTES", spec::Display::Text, 0, 1, kNoteMapShort));
     global.bind(3, &m_proc.accentParameter(), cellParam("ACCNT", spec::Display::Numeric, 0, 127));
-    for (int k = 4; k < 8; ++k) global.bind(k, nullptr, spec::kBlankParam);
+    for (int k = 4; k < kMasterCell; ++k) global.bind(k, nullptr, spec::kBlankParam);
+    global.joinLeft(5);   // cells 4-6: one frame for INIT KIT and EXPORT
+    global.joinLeft(6);
+    auto masterSwitch = cellParam("MASTER", spec::Display::Readout, 1, 1, kOffOn);   // the OFF/ON switch and its word
+    masterSwitch.icons = spec::Icons::Toggle;
+    global.bind(kMasterCell, &m_proc.masterOnParameter(), masterSwitch);
+    global.cell(kMasterCell).setDragSteps(4.0, 1.0, 1.0);   // a flip per 40 px of drag, not per 160
+    // MASTER: the 32 master bytes, a page per block in the hardware's order, the hardware's labels; defaults the init kit's
+    for (int b = 0; b < params::kMasterBlocks; ++b) {
+        auto& pg = page(kMasterPages[b]);
+        for (int k = 0; k < params::kMasterBlockParams; ++k) {
+            const int i = params::kMasterPageBlocks[size_t(b)] * params::kMasterBlockParams + k;
+            pg.bind(k, &m_proc.masterParameter(i), cellParam(params::kMasterNames[size_t(i)], masterBipolar(i) ? spec::Display::Bipolar : spec::Display::Numeric,
+                                                             md::engine::master::kDefaultParams[size_t(i)], 127));
+        }
+    }
     m_initKit.onClick = [this] { m_proc.loadDefaultKit(); m_kits.showMessage("INIT KIT LOADED"); };
     m_export.onClick = [this] { openExportChooser(); };
     // MIXER: every track's LEV
@@ -760,6 +801,7 @@ void OneView::resized()
     // the header: the machine block (or GLOBAL) at the left; MENU at the right, the product name and the loaded kit before it
     m_machineBar.setBounds(juce::Rectangle<int>(m_machineBar.preferredWidth(), m_machineBar.preferredHeight()).withPosition(at(0, 0)));
     m_globalTitle.setBounds(juce::Rectangle<int>(m_globalTitle.preferredWidth(), m_globalTitle.preferredHeight()).withPosition(at(0, 0)));
+    m_masterTitle.setBounds(juce::Rectangle<int>(m_masterTitle.preferredWidth(), m_masterTitle.preferredHeight()).withPosition(at(0, 0)));
     m_menu.setBounds(juce::Rectangle<int>(kMenuW * kScale, kMenuH * kScale).withPosition(at(kLcdContentW - kMenuW, (MachineBar::kLcdH - kMenuH) / 2)));
     const int nameW = LcdCanvas::textWidth(spec::kFontBold8, kProductName), nameX = kLcdContentW - kMenuW - kMenuGap - nameW;
     m_nameplate = juce::Rectangle<int>(nameW * kScale, spec::kFontBold8.h * kScale).withPosition(at(nameX, (MachineBar::kLcdH - spec::kFontBold8.h) / 2));
@@ -767,7 +809,7 @@ void OneView::resized()
     m_kitBox.setBounds(juce::Rectangle<int>(kitW, KitBox::kLcdH * kScale).withPosition(at(nameX - 8, 0) - juce::Point<int>(kitW, 0)));
     m_strip.setBounds(juce::Rectangle<int>(TrackStrip::kLcdW * kScale, TrackStrip::kLcdH * kScale).withPosition(at(0, kStripY)));
 
-    // the pages: SYN | AMP/EFX over ROUTE | LFO; GLOBAL: MIXER over GLOBAL | KITS
+    // the pages: SYN | AMP/EFX over ROUTE | LFO; GLOBAL: MIXER over GLOBAL | KITS; MASTER: ECHO | REV over EQ | DYN
     const int x2 = KnobPage::kLcdW + kColumnGap, y2 = kRow2Y;
     const auto place = [&](juce::Component& c, int x, int y, int w) { c.setBounds(juce::Rectangle<int>(w, KnobPage::kHeight).withPosition(at(x, y))); };
     place(page(Syn), 0, kPagesY, KnobPage::kWidth);
@@ -777,10 +819,14 @@ void OneView::resized()
     place(page(Mixer), 0, kPagesY, MixerPage::kWidth);
     place(page(Global), 0, y2, KnobPage::kWidth);
     place(m_kits, x2, y2, KnobPage::kWidth);
-    // INIT KIT and EXPORT over the GLOBAL page's bottom row, two cells each
-    const int by = y2 + KnobPage::kGridY + kCell;
-    m_initKit.setBounds(juce::Rectangle<int>((2 * kCell - 7) * kScale, 15 * kScale).withPosition(at(4, by + 9)));
-    m_export.setBounds(juce::Rectangle<int>((2 * kCell - 7) * kScale, 15 * kScale).withPosition(at(2 * kCell + 4, by + 9)));
+    place(page(Echo), 0, kPagesY, KnobPage::kWidth);
+    place(page(Rev), x2, kPagesY, KnobPage::kWidth);
+    place(page(Eq), 0, y2, KnobPage::kWidth);
+    place(page(Dyn), x2, y2, KnobPage::kWidth);
+    // INIT KIT over EXPORT, over the GLOBAL page's bottom row's first three cells (MASTER is the fourth)
+    const int by = y2 + KnobPage::kGridY + kCell, bw = 3 * kCell - 7, bh = 12;
+    m_initKit.setBounds(juce::Rectangle<int>(bw * kScale, bh * kScale).withPosition(at(4, by + 3)));
+    m_export.setBounds(juce::Rectangle<int>(bw * kScale, bh * kScale).withPosition(at(4, by + kCell - 2 - bh)));
     // the picker unrolls from under the header over the pages and the strip
     m_picker.setTargetBounds(juce::Rectangle<int>(kLcdContentW * kScale, (kLcdContentH - kPagesY) * kScale).withPosition(at(0, kPagesY)));
 
@@ -815,7 +861,7 @@ void OneView::selectTrack(int t)
     m_picker.close(false);
     const bool changed = t != m_track;
     m_track = t;
-    m_global = false;
+    m_global = m_master = false;
     if (changed) bindTrack();
     updateHeader();
 }
@@ -824,24 +870,36 @@ void OneView::showGlobal()
 {
     m_picker.close(false);
     m_global = true;
+    m_master = false;
+    updateHeader();
+}
+
+void OneView::showMaster()
+{
+    m_picker.close(false);
+    m_master = true;
+    m_global = false;
     updateHeader();
 }
 
 void OneView::updateHeader()
 {
-    m_strip.setSelected(m_global ? TrackStrip::kGlobal : m_track);
-    for (auto p : {Syn, Effects, Routing, Lfo}) page(p).setVisible(!m_global);
+    const bool track = !m_global && !m_master;
+    m_strip.setSelected(m_global ? TrackStrip::kGlobal : m_master ? TrackStrip::kMaster : m_track);
+    for (auto p : {Syn, Effects, Routing, Lfo}) page(p).setVisible(track);
     for (auto p : {Global, Mixer}) page(p).setVisible(m_global);
+    for (auto p : kMasterPages) page(p).setVisible(m_master);
     for (auto* c : {(juce::Component*)&m_kits, (juce::Component*)&m_initKit, (juce::Component*)&m_export, (juce::Component*)&m_globalTitle})
         c->setVisible(m_global);
-    m_machineBar.setVisible(!m_global);
+    m_masterTitle.setVisible(m_master);
+    m_machineBar.setVisible(track);
     resized();
     repaint();
 }
 
 void OneView::openMachinePicker(bool animate)
 {
-    if (m_global || !m_picker.canOpen()) return;
+    if (m_global || m_master || !m_picker.canOpen()) return;
     m_picker.open(animate);
 }
 
@@ -1086,6 +1144,7 @@ void OneView::timerCallback()
     m_strip.triggered(m_proc.takeTriggeredTracks());
     m_strip.tick();
     page(Lfo).refreshText();   // TRACK and PARAM follow the destination track's machine
+    for (auto p : kMasterPages) page(p).setBadge(m_proc.masterOn() ? juce::String() : juce::String("OFF"));   // the master switched off
     m_kitBox.setKit(m_proc.kitName(), m_proc.kitBank());
     if (m_tick % 45 == 0) m_library.refresh();   // the kit folder, every 1.5 s (a directory listing when nothing changed)
     m_kits.update();
