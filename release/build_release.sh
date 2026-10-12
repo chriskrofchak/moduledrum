@@ -9,9 +9,9 @@
 #                or SHA-1 of a "Developer ID Application" certificate in the keychain
 #   -n           notarize the installer and staple the tickets (needs a real identity, MD_INSTALLER_IDENTITY and
 #                MD_NOTARY_PROFILE); without it the script says that notarization was skipped
-#   -a archs     arm64 (the default) or universal (arm64 + x86_64). The x86_64 slice runs dsp56300's x64 JIT, which crashed
-#                intermittently under Rosetta in its first test (.clew increment 0010, docs/DEVELOPMENT.md): it stays out
-#                of the default until it has been verified on an Intel Mac or fixed.
+#   -a archs     arm64 (the default) or universal (arm64 + x86_64). The x86_64 slice runs dsp56300's x64 JIT, whose patch
+#                still lacks a Z-flag fix (.clew increment 0010, docs/DEVELOPMENT.md) and which no Intel Mac has run: it
+#                stays out of the default until that is in.
 #
 # Environment:
 #   MD_INSTALLER_IDENTITY  "Developer ID Installer: ..." certificate that signs the .pkg; without it the .pkg is unsigned

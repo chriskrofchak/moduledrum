@@ -173,9 +173,9 @@ cmake -S . -B build-universal -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_AR
 
 builds the plugins, the standalone app and the command-line tools for both architectures (dsp56300 and asmjit select
 their JIT back end by compiler macro, so one configure is enough; `lipo -archs` shows both). **The x86_64 slice is not
-trusted yet:** run under Rosetta, its `md-hash` and most tests are right, but the JIT lockstep check finds the x64 JIT
-disagreeing with the interpreter in one flag, and the plugin render and state checks crashed intermittently (details in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). Treat it as experimental until it has run on an Intel Mac. To run
+trusted yet:** run under Rosetta, its `md-hash` and all ten tests are right, but the JIT lockstep check finds the x64 JIT
+leaving the Z flag set after an LSL loop (a two-line fix is known and still has to go into `ext/patches`; details in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), and no Intel Mac has run it. Treat it as experimental. To run
 the tests of the x86_64 slice on Apple Silicon (an arm64 CMake's `ctest` cannot be started with `arch -x86_64`), let
 CMake start every test through Rosetta:
 
@@ -228,7 +228,8 @@ Without the OS file, the tests that run the engine are reported as skipped and t
 the plugin's parameters and saved state, and the editor's kit browser. `plugin-editor` drives the editor headlessly;
 `plugin-rt` checks that `processBlock` makes no heap allocation (macOS);
 `md-plugin-check --snapshot <dir>` renders its pages to PNG for review (they show artwork read from your OS file, so
-don't commit them).
+don't commit them). Run one `ctest` at a time: the plugin checks keep their settings in a folder named after the check,
+so two runs at once (also from two build directories or two worktrees) delete each other's and fail or crash.
 
 The golden test checks that `md-hash`'s pattern still renders bit for bit what it did: `build/src/cli/md-hash <OS.syx>`
 prints `hash 04ef1db4fe767721` with OS 1.63, with the JIT and with the interpreter, and `MD_GROUPS=2` must print the same.
@@ -270,8 +271,8 @@ The engine in `src/core/md` is sd88me's, vendored from Machinemodule for MPC OS
   about 5% of one core on `md-hash`'s sparse pattern and about 7% with every track retriggered 8 times per beat
   (the interpreter: 18% and 32%). An idle instance still runs the whole DSP every block.
 - **macOS only** for now. Releases are arm64 (Apple Silicon); the x86_64 slice of a universal build is experimental: the
-  x64 JIT disagrees with the interpreter in the Z flag after one loop (the audio is unaffected so far) and the plugin
-  render and state checks crashed intermittently under Rosetta, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+  x64 JIT leaves the Z flag set after one LSL loop (the audio is unaffected so far) and no Intel Mac has run it, see
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Settings and data
 
