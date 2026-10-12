@@ -137,3 +137,18 @@ TEST_CASE(jit_asl_overflow_sets_limit)
     checkSameRegisters(r);
     CHECK((r.jit->dsp.getSR().var & (CCR_V | CCR_L)) == (CCR_V | CCR_L));
 }
+
+// Fix 4 (x86-64 JIT only; the aarch64 JIT never had the bug): a non-zero LSL/LSR after a zero result must clear Z, as the
+// interpreter does. The zero shift leaves Z=1 in the same block, then the non-zero shift must take it away.
+TEST_CASE(jit_lsl_after_zero_clears_z)
+{
+    const auto r = runBoth({{"move #>$0,a", "lsl #$c,a", "move #>$1f9fed,a", "lsl #$c,a", "nop"}, {}, {}});
+    checkSameRegisters(r);
+    CHECK((r.jit->dsp.getSR().var & CCR_Z) == 0);
+}
+TEST_CASE(jit_lsr_after_zero_clears_z)
+{
+    const auto r = runBoth({{"move #>$0,b", "lsr #$3,b", "move #>$1f9fed,b", "lsr #$3,b", "nop"}, {}, {}});
+    checkSameRegisters(r);
+    CHECK((r.jit->dsp.getSR().var & CCR_Z) == 0);
+}

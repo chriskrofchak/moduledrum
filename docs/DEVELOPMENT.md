@@ -147,6 +147,8 @@ why that submodule always shows as modified; `MD patch` markers in the source; o
    made earlier in the same block (this changed the audio of 5 of the 16 preset kits).
 3. `jitops_alu_aarch64.cpp` / `_x64.cpp`: ASL by zero set C for negative values on aarch64; multi-bit ASL never set L
    together with V on either back end.
+4. `jitops_alu_x64.cpp` (x86-64 only): LSL/LSR did not clear a stale Z (their CCR batch covered N, C and V but not Z).
+   Found by lockstep under Rosetta (increment 0018); tests `jit_lsl_after_zero_clears_z` / `jit_lsr_after_zero_clears_z`.
 
 These are upstream bugs (dsp56300/dsp56300) and affect Monomodule too; they have not been reported upstream yet.
 
@@ -161,7 +163,7 @@ test command. OS 1.63:
 - `md-hash`: `hash 04ef1db4fe767721`, also with `MD_GROUPS=2` and `4`.
 - ctest, one run at a time: all 10 pass on the x86_64 slice (romart, firmware, golden-hash, kits, jit, resampler,
   plugin-os-load, plugin-render, plugin-state, plugin-editor).
-- **Finding 1 (lockstep): a real x64 JIT bug, found, fixed in a scratch tree, not yet in the patch.**
+- **Finding 1 (lockstep): a real x64 JIT bug - now fix 4 of the patch, with its tests (increment 0018).**
   `MD_JIT_LOCKSTEP=1 md-hash` reports a first difference that the aarch64 JIT does not have: after JIT block 136872
   (P:$1038c0 to $1038ca, instruction 5596681) `sr jit=80044 interp=80040`, i.e. Z is set on the x64 JIT. The block is a
   `DO #$22` loop in one machine's set-up code: per iteration two table words are loaded and each is shifted left by 12
@@ -192,8 +194,8 @@ test command. OS 1.63:
   lldb session caused it is not known. Native lldb on arm64 is fine.
 
 So the repo's x86_64 slice is still opt-in (the release script builds arm64 unless told `-a universal`, the README says
-so): the patch lacks the Z fix and there has been no Intel hardware. Once the patch has it and the test is in, the
-universal build can become the default.
+so): the Z fix is in the patch and verified under Rosetta (the tests fail without it, the lockstep render is clean), but
+there has been no Intel hardware. Once a real Intel Mac has run the full ctest, the universal build can become the default.
 
 ## Decisions (made, not to be re-litigated without a reason)
 
@@ -225,7 +227,7 @@ universal build can become the default.
   addresses only after checking the ColdFire section's size and hash.
 - **The processor must never take the engine lock from the message thread for display** (the old status line did, and
   the audio thread dropped blocks); the editor reads atomics.
-- **Packaging:** releases are arm64 until the x64 JIT patch has its Z fix and has run on Intel (the universal build exists and is opt-in). The build
+- **Packaging:** releases are arm64 until the x64 JIT has run on real Intel hardware (the universal build exists and is opt-in; its JIT is fixed and lockstep-clean under Rosetta). The build
   signs the bundles itself (hardened runtime; the JIT entitlements only stick to the standalone app, plugins run on their
   host's), the installer installs system-wide (AU, VST3, app), and the `.zip` is made after notarization and stapling.
 - **Voice budget, silence release and voice-group splitting stay off** (not hardware behaviour, or not bit-exact).
@@ -259,9 +261,9 @@ verification of their claims.
   /Library/Audio/Plug-Ins, the app to /Applications) and a `.zip` of the three bundles; `-n` notarizes and staples
   (needs the owner's Developer ID certificates and a `notarytool` keychain profile, untested here);
   `.github/workflows/build.yml` builds and tests on an Apple Silicon runner and uploads the bundles; the README has
-  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the x64 Z-flag fix in the
-  JIT patch with its test, and the checks' shared temp folders (both above; the default release is arm64 until the first
-  is in), loading the packaged build in a DAW, and the owner's certificates.
+  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: the checks' shared temp
+  folders (increment 0020), an Intel-hardware run before the default release becomes universal, loading the packaged
+  build in a DAW, and the owner's certificates.
 - **0009 Master effects.** The Machinedrum's master section (rhythm echo, gate box/reverb, master EQ, dynamix) runs on
   the mixer DSP (DSP1). **Steps 1-3 (engine) are done**: DSP1's own master pass runs on a second emulated DSP behind the
   mixer, parameterised by the OS's own code (see "Master effects, engine side" above; the increment holds the research, the

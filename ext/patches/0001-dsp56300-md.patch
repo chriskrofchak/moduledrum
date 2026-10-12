@@ -15,6 +15,9 @@ running both in lockstep). cmake/dsp56300.cmake applies it to the checkout at co
 3. jitops_alu_aarch64.cpp, jitops_alu_x64.cpp, JitOps::alu_asl: on aarch64, ASL by zero (#0, or a shift register that
    holds 0) set C for every negative value (C was bit 56 of the sign-extended value); and on both back ends a multi-bit
    ASL never set L when it set V. The interpreter clears C for a zero shift and sets L along with V.
+4. jitops_alu_x64.cpp, JitOps::alu_lsl / alu_lsr: the CCR batch update covered N, C and V but not Z, so a Z=1 from an
+   earlier zero result was never cleared by a non-zero LSL/LSR (the x86-64 JIT only; found by MD_JIT_LOCKSTEP under
+   Rosetta, increment 0018). Z joins the batch, as in the interpreter.
 
 diff --git a/source/dsp56kEmu/jitblock.cpp b/source/dsp56kEmu/jitblock.cpp
 index a16f69e0..9deb79c0 100644
@@ -164,7 +167,7 @@ index 4d2e9864..768ec380 100644
  		m_dspRegs.mask56(alu);
  
 diff --git a/source/dsp56kEmu/jitops_alu_x64.cpp b/source/dsp56kEmu/jitops_alu_x64.cpp
-index 74c72082..49118c6f 100644
+index 74c72082..b4c37550 100644
 --- a/source/dsp56kEmu/jitops_alu_x64.cpp
 +++ b/source/dsp56kEmu/jitops_alu_x64.cpp
 @@ -92,6 +92,7 @@ namespace dsp56k
@@ -175,3 +178,25 @@ index 74c72082..49118c6f 100644
  		
  		m_asm.shr(alu, asmjit::Imm(8));				// correction for our pre-shift by 8
  
+@@ -140,7 +141,9 @@ namespace dsp56k
+ 
+ 	void JitOps::alu_lsl(TWord ab, const DspValue& _shiftAmount)
+ 	{
+-		CcrBatchUpdate bu(*this, static_cast<CCRMask>(CCR_N | CCR_C | CCR_V));
++		// MD patch: Z in the batch too. The batch clears its bits and makes ccr_update() OR-only, so without Z here a Z=1 left by
++		// an earlier zero result survived a non-zero shift (the interpreter clears it; found by MD_JIT_LOCKSTEP on x86-64).
++		CcrBatchUpdate bu(*this, static_cast<CCRMask>(CCR_N | CCR_Z | CCR_C | CCR_V));
+ 		DspValue d(m_block);
+ 		getALU1(d, ab);
+ 		if(_shiftAmount.isImm24())
+@@ -164,7 +167,9 @@ namespace dsp56k
+ 
+ 	void JitOps::alu_lsr(TWord ab, const DspValue& _shiftAmount)
+ 	{
+-		CcrBatchUpdate bu(*this, static_cast<CCRMask>(CCR_N | CCR_C | CCR_V));
++		// MD patch: Z in the batch too. The batch clears its bits and makes ccr_update() OR-only, so without Z here a Z=1 left by
++		// an earlier zero result survived a non-zero shift (the interpreter clears it; found by MD_JIT_LOCKSTEP on x86-64).
++		CcrBatchUpdate bu(*this, static_cast<CCRMask>(CCR_N | CCR_Z | CCR_C | CCR_V));
+ 		DspValue d(m_block);
+ 		getALU1(d, ab);
+ 		if(_shiftAmount.isImm24())
