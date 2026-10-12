@@ -83,7 +83,7 @@ Moduledrum needs **Machinedrum OS 1.63**, a free download from Elektron's websit
 
 1. Download `Elektron_SPS1-1UW_OS1.63.zip` from Elektron.
 2. Unzip it. Inside is `Elektron_SPS1-1UW_OS1.63.syx`.
-3. Open Moduledrum, click **Select OS File...** and choose that `.syx` file.
+3. Open Moduledrum, open **MENU** (top right of the LCD), choose **Select OS File...** and pick that `.syx` file.
 
 You only have to do this once: every Moduledrum instance shares the setting. The file stays where you put it.
 Moduledrum reads it each time it starts and never copies it or redistributes it.
