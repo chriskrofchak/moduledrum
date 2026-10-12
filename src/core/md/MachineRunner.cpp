@@ -45,6 +45,7 @@ namespace md::engine
 		uint32_t exec() override { return execInstruction(); }	// CPU only: no on-chip peripherals
 
 		void setAReg(const int _i, const uint32_t _v) { m68k_set_reg(getCpuState(), static_cast<m68k_register_t>(M68K_REG_A0 + _i), _v); }
+		void setDReg(const int _i, const uint32_t _v) { m68k_set_reg(getCpuState(), static_cast<m68k_register_t>(M68K_REG_D0 + _i), _v); }
 		void setSR(const uint32_t _v) { m68k_set_reg(getCpuState(), M68K_REG_SR, _v); }
 
 		uint8_t* ptr(const uint32_t _addr, const uint32_t _n)
@@ -135,6 +136,11 @@ namespace md::engine
 
 	int64_t MachineRunner::call(const uint32_t _address, const std::initializer_list<uint32_t> _args)
 	{
+		return callUntil(_address, kReturnSentinel, _args);
+	}
+
+	int64_t MachineRunner::callUntil(const uint32_t _address, const uint32_t _stopPc, const std::initializer_list<uint32_t> _args)
+	{
 		m_fault.clear();
 		auto& cpu = *m_cpu;
 		uint32_t sp = kStackTop;
@@ -142,16 +148,31 @@ namespace md::engine
 		// runs on the plugin's audio thread (every control tick and trigger) and must not allocate.
 		for(auto it = std::rbegin(_args); it != std::rend(_args); ++it) { sp -= 4; poke32(sp, *it); }
 		sp -= 4; poke32(sp, kReturnSentinel);
+		// A stretch in the middle of a routine ends before the routine's epilogue, which would have given the callee-saved
+		// registers back (D2-D7, A2-A6): do that here, so that the code after the call sees what it saw before it
+		const bool partial = _stopPc != kReturnSentinel;
+		std::array<uint32_t, 6> keepD{};	// D2-D7
+		std::array<uint32_t, 5> keepA{};	// A2-A6
+		if(partial)
+		{
+			for(uint32_t k = 0; k < keepD.size(); ++k) keepD[k] = cpu.getDReg(2 + k);
+			for(uint32_t k = 0; k < keepA.size(); ++k) keepA[k] = cpu.getAReg(2 + k);
+		}
 		cpu.setAReg(7, sp);
 		cpu.setPC(_address);
 		cpu.m_badAccesses = 0;
 		uint64_t n = 0;
-		while(cpu.getPC() != kReturnSentinel)
+		for(uint32_t pc = _address; pc != kReturnSentinel && pc != _stopPc; pc = cpu.getPC())
 		{
 			cpu.exec();
 			if(++n > kMaxInstructions) { m_fault = "instruction budget exceeded"; return -1; }
 		}
 		m_lastInstructions = n;
+		if(partial)
+		{
+			for(size_t k = 0; k < keepD.size(); ++k) cpu.setDReg(2 + static_cast<int>(k), keepD[k]);
+			for(size_t k = 0; k < keepA.size(); ++k) cpu.setAReg(2 + static_cast<int>(k), keepA[k]);
+		}
 		if(cpu.m_badAccesses) { m_fault = "access outside main RAM / internal SRAM"; return -1; }
 		return cpu.getDReg(0);
 	}

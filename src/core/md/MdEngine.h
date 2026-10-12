@@ -1,6 +1,7 @@
 // Machinedrum One's engine: the OS's own control code (HostModel + MachineRunner), the voice DSP (VoiceEngine,
-// emulated) and the mixer DSP's per-track effects and mix as native C++ (TrackFx, Mixer). One 32-sample block
-// at a time: all 16 tracks, the dry main mix, the reverb/delay sends and each track's own output.
+// emulated) and the mixer DSP's per-track effects and mix as native C++ (TrackFx, Mixer), then the master effects
+// (MasterFx: the mixer DSP's own master section on a second emulated DSP, behind the mix; optional). One 32-sample block
+// at a time: all 16 tracks, the dry main mix, the reverb/delay sends, each track's own output and the master output.
 #pragma once
 #include <algorithm>
 #include <chrono>
@@ -12,6 +13,7 @@
 #include <vector>
 #include "HostModel.h"
 #include "MachineRunner.h"
+#include "MasterFx.h"
 #include "Mixer.h"
 #include "ParallelVoiceEngine.h"
 #include "TrackFx.h"
@@ -19,6 +21,13 @@
 
 namespace md::engine
 {
+	struct EngineOptions
+	{
+		// The master effects need a second emulated DSP (a few hundred MB and 0.2 s of boot-up) and, per block, 12 us.
+		// False: no MasterFx (Output::master stays zero); the dry outputs are the same either way.
+		bool master = true;
+	};
+
 	// TVoices: VoiceEngine (default, one DSP2 instance) or ParallelVoiceEngine (splits the 16 voices across
 	// threads - see its header and HANDOFF.md, "per-machine cost profiled"). Template so both share this same
 	// code; defined inline here (not in Engine.cpp, which is now just an include of this header, kept so
@@ -32,25 +41,27 @@ namespace md::engine
 		static constexpr int kTracks = 16;
 		static constexpr int kBlock = 32;
 
+		using Options = EngineOptions;
+
 		// _osImage: the OS file's section 0 (the ColdFire OS), decompressed. Constructs TVoices with just the
-		// firmware (VoiceEngine's own constructor).
-		EngineT(const fw::Firmware& _fw, std::vector<uint8_t> _osImage)
+		// firmware (VoiceEngine's own constructor). The master effects are built when the firmware has them (MasterFx::available).
+		EngineT(const fw::Firmware& _fw, std::vector<uint8_t> _osImage, Options _options = {})
 			: m_tables(_fw), m_mixer(m_tables)
 		{
 			m_os = std::make_unique<MachineRunner>(std::move(_osImage));
 			m_voices = std::make_unique<TVoices>(_fw);
-			init();
+			init(_fw, _options);
 		}
 
 		// As above, but forwards _voicesArg to TVoices' constructor too (e.g. ParallelVoiceEngine's group
 		// count). Only ever instantiated for a TVoices whose constructor actually takes (firmware, _voicesArg).
 		template<class TVoicesArg>
-		EngineT(const fw::Firmware& _fw, std::vector<uint8_t> _osImage, TVoicesArg _voicesArg)
+		EngineT(const fw::Firmware& _fw, std::vector<uint8_t> _osImage, TVoicesArg _voicesArg, Options _options = {})
 			: m_tables(_fw), m_mixer(m_tables)
 		{
 			m_os = std::make_unique<MachineRunner>(std::move(_osImage));
 			m_voices = std::make_unique<TVoices>(_fw, _voicesArg);
-			init();
+			init(_fw, _options);
 		}
 
 		~EngineT() = default;
@@ -59,19 +70,46 @@ namespace md::engine
 		const MachineRunner& os() const { return *m_os; }
 		TVoices& voices() { return *m_voices; }
 
+		// The voice DSP's 16 outputs of the last render, before the per-track effects (what the mixer DSP's own loop takes in:
+		// tests/Dsp1Reference runs that loop on them)
+		const typename TVoices::Block& voiceOutput() const { return m_voiceOut; }
+
+		// The master effects, or null (Options::master false, or a firmware without the section)
+		MasterFx* master() { return m_master.get(); }
+		bool hasMaster() const { return m_master != nullptr; }
+
+		// Settle the master section at the host's current master bytes and tempo: HostModel::primeMasterFx(), the words to the
+		// DSP at once and the echo's delay offset snapped to its target. Use it after loading a kit (or setting the tempo) when
+		// the sound should start at the new settings and not glide there as the hardware does. Between two blocks.
+		void primeMaster()
+		{
+			m_host->primeMasterFx();
+			flushMasterWords();
+			if(m_master)
+				m_master->snapEcho();
+		}
+
 		struct Output
 		{
 			Mixer::Output mix;													// main, sends, individual outputs
 			std::array<std::array<int32_t, kBlock>, kTracks> tracks{};			// each track after its effects
+			// The master effects' stereo output (frame channels 2 and 5 after the master pass: the dry main mix through the
+			// echo, reverb, EQ and dynamix, plus tracks routed to outputs A and B), 24-bit. Not level-neutral against mix.main.
+			// Zero without a master section; the other four channels of the output frame are mix.frame's.
+			Mixer::Stereo master{};
 		};
 
 		// Optional stage timing (microseconds, accumulated): track effects, and the mix. The OS tick and the voice DSP
 		// are HostModel's (host().tickUs / dspUs).
 		uint32_t dryMute = 0;	// tracks kept out of the dry main mix (see Mixer::process); set by the caller between renders
 		bool timingOn = false;
-		double fxUs = 0, mixUs = 0;
+		double fxUs = 0, mixUs = 0, masterUs = 0;
 
 		static constexpr bool kParallel = std::is_same_v<TVoices, ParallelVoiceEngine>;
+
+		// Word sets the master DSP is warmed up with when the engine is made (MasterFx::warmUp): 96 blocks of synthetic signal
+		// each, about 1 ms per set once compiled, and the compile itself
+		static constexpr int kMasterWarmUpSets = 24;
 
 		// One track's effects: a settled silent track's chain gives the same again while its input stays silent and
 		// its state (which holds its params) stays the same, so it is skipped. Exact - see HANDOFF.md, "fixed
@@ -110,23 +148,65 @@ namespace md::engine
 				in[t] = _out.tracks[t].data();
 				mix[t] = m_host->mixerInput(t).mix;
 			}
-			if(!timingOn) { m_mixer.process(in.data(), mix.data(), _out.mix, dryMute); return true; }
+			if(!timingOn)
+			{
+				m_mixer.process(in.data(), mix.data(), _out.mix, dryMute);
+				return renderMaster(_out);
+			}
 			const auto tf1 = std::chrono::steady_clock::now();
 			m_mixer.process(in.data(), mix.data(), _out.mix, dryMute);
 			const auto tf2 = std::chrono::steady_clock::now();
+			const bool ok = renderMaster(_out);
+			const auto tf3 = std::chrono::steady_clock::now();
 			fxUs += std::chrono::duration<double, std::micro>(tf1 - tf0).count();
 			mixUs += std::chrono::duration<double, std::micro>(tf2 - tf1).count();
-			return true;
+			masterUs += std::chrono::duration<double, std::micro>(tf3 - tf2).count();
+			return ok;
 		}
 
-		const std::string& fault() const { return m_voices->faultReason(); }
+		// The voice DSP's fault, else the master DSP's
+		const std::string& fault() const { return m_voices->faultReason().empty() && m_master ? m_master->faultReason() : m_voices->faultReason(); }
 
 		bool skipSettled = true;	// false: run every track's effects every block (for verifying the skip)
 
 	private:
-		void init()
+		// The words the OS worked out since the last block go to the master DSP (HostModel::takeMasterGroups), then the master pass
+		void flushMasterWords()
+		{
+			const unsigned groups = m_host->takeMasterGroups();
+			if(!m_master)
+				return;
+			for(int g = 0; g < master::kGroups; ++g)
+				if(groups & (1u << g))
+					m_master->writeGroup(g, m_host->masterWords().data() + master::kGroup[g].offset);
+		}
+
+		bool renderMaster(Output& _out)
+		{
+			if(!m_master)
+				return true;
+			flushMasterWords();
+			return m_master->process(_out.mix, _out.master);
+		}
+
+		// Compile the master section ahead of the first live block, on settings that take its data-dependent paths (see
+		// MasterFx::warmUp): synthetic master bytes through the OS's own parameter code, a few hundred blocks of synthetic signal
+		void warmUpMaster()
+		{
+			std::vector<uint32_t> words(static_cast<size_t>(kMasterWarmUpSets) * master::kWords);
+			m_host->masterWarmUpWords(kMasterWarmUpSets, words.data());
+			m_master->warmUp(words.data(), kMasterWarmUpSets);
+		}
+
+		void init(const fw::Firmware& _fw, const Options& _options)
 		{
 			m_host = std::make_unique<HostModel<TVoices>>(*m_os, *m_voices);
+			if(_options.master && MasterFx::available(_fw))
+			{
+				m_master = std::make_unique<MasterFx>(_fw);
+				warmUpMaster();
+				flushMasterWords();		// the host primed its words when it was made: all four groups are due
+			}
 			for(auto& s : m_state)
 				TrackFx::init(s);
 			m_fxs.push_back(std::make_unique<TrackFx>(m_tables));
@@ -147,6 +227,7 @@ namespace md::engine
 		std::unique_ptr<MachineRunner> m_os;
 		std::unique_ptr<TVoices> m_voices;
 		std::unique_ptr<HostModel<TVoices>> m_host;
+		std::unique_ptr<MasterFx> m_master;
 		TrackFx::Tables m_tables;
 		std::vector<std::unique_ptr<TrackFx>> m_fxs;	// one per voice group (one when not parallel)
 		Output* m_out = nullptr;

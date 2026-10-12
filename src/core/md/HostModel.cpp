@@ -26,6 +26,11 @@ namespace md::engine
 		constexpr uint32_t kLevel = 0x1000d7c;		// smoothed track levels: 16 words (value << 7); then 32 master FX
 		constexpr uint32_t kLevelTarget = 0x1000f5c;	// their targets: 48 bytes (0-127)
 		constexpr uint32_t kLevelSmooth = 0x100029e;	// new = (3 old + target << 7) >> 2, all 48
+		constexpr uint32_t kMasterTarget = kLevelTarget + 16, kMasterSmoothed = kLevel + 32;	// the 32 master bytes / words after the 16 levels
+		// The tail of the OS's tick routine that turns the smoothed master values and the tempo into DSP1's words: one of
+		// four groups by the tick counter, from absolute addresses only (it needs nothing the rest of the tick sets up)
+		constexpr uint32_t kMasterTail = 0x20b4a2, kMasterTailEnd = 0x20ba4c, kTickCounter = 0x265404;
+		constexpr uint32_t kMasterBuffer[master::kGroups] = {0x1001af4, 0x1001b18, 0x1001b44, 0x1001b74};	// the 68k buffers of groups 0-3
 
 		bool isAudioMachine(const uint8_t _id) { return !(_id >= 0x60 && _id <= 0x7b); }	// MID/CTR: no audio
 	}
@@ -45,6 +50,9 @@ namespace md::engine
 			setMachine(t, 0);
 			setLfo(t, t, 0, 0, 0, 0);
 		}
+		for(int i = 0; i < master::kParams; ++i)
+			setMasterFx(i, master::kDefaultParams[static_cast<size_t>(i)]);
+		primeMasterFx();
 	}
 
 	template<class TVoices>
@@ -67,6 +75,93 @@ namespace md::engine
 	void HostModel<TVoices>::setTempo(const double _bpm)
 	{
 		m_os.poke32(kTempo, static_cast<uint32_t>(std::lround(std::clamp(_bpm, 30.0, 300.0) * 24.0)));
+	}
+
+	template<class TVoices>
+	void HostModel<TVoices>::setMasterFx(const int _index, const int _value)
+	{
+		const auto v = static_cast<uint8_t>(std::clamp(_value, 0, 127));
+		m_masterRaw[static_cast<size_t>(_index)] = v;
+		m_os.poke8(kMasterTarget + static_cast<uint32_t>(_index), v);
+	}
+
+	template<class TVoices>
+	void HostModel<TVoices>::runMasterGroup(const int _group, uint32_t* _words)
+	{
+		// the group is selected by the tick counter (the tail reads it, and nothing else does here): put it back afterwards
+		const uint32_t counter = m_os.peek32(kTickCounter);
+		m_os.poke32(kTickCounter, static_cast<uint32_t>(_group));
+		m_os.callUntil(kMasterTail, kMasterTailEnd);
+		m_os.poke32(kTickCounter, counter);
+		for(int i = 0; i < master::kGroup[_group].count; ++i)
+			_words[i] = m_os.peek32(kMasterBuffer[_group] + 4 * static_cast<uint32_t>(i)) & 0xffffff;
+	}
+
+	template<class TVoices>
+	void HostModel<TVoices>::primeMasterFx()
+	{
+		// The OS's slew moves all 48 smoothed values (16 track levels, 32 master) per call: keep the levels where they are
+		std::array<uint16_t, kTracks> levels{};
+		for(size_t t = 0; t < levels.size(); ++t)
+			levels[t] = m_os.peek16(kLevel + 2 * static_cast<uint32_t>(t));
+		for(int pass = 0; pass < 256; ++pass)	// from 0 to 127 << 7 the slew settles in about 40 calls
+		{
+			std::array<uint16_t, master::kParams> before{};
+			for(size_t i = 0; i < before.size(); ++i)
+				before[i] = m_os.peek16(kMasterSmoothed + 2 * static_cast<uint32_t>(i));
+			m_os.call(kLevelSmooth, {});
+			bool same = true;
+			for(size_t i = 0; i < before.size(); ++i)
+				same = same && before[i] == m_os.peek16(kMasterSmoothed + 2 * static_cast<uint32_t>(i));
+			if(same)
+				break;
+		}
+		for(size_t t = 0; t < levels.size(); ++t)
+			m_os.poke16(kLevel + 2 * static_cast<uint32_t>(t), levels[t]);
+		for(int g = 0; g < master::kGroups; ++g)
+			runMasterGroup(g, m_masterWords.data() + master::kGroup[g].offset);
+		m_masterPending = (1u << master::kGroups) - 1;
+	}
+
+	template<class TVoices>
+	void HostModel<TVoices>::computeMasterWords(const uint8_t* _params, const double _bpm, uint32_t* _words)
+	{
+		std::array<uint16_t, master::kParams> smoothed{};
+		for(size_t i = 0; i < smoothed.size(); ++i)
+		{
+			smoothed[i] = m_os.peek16(kMasterSmoothed + 2 * static_cast<uint32_t>(i));
+			m_os.poke16(kMasterSmoothed + 2 * static_cast<uint32_t>(i), static_cast<uint16_t>((_params[i] & 0x7f) << 7));
+		}
+		const uint32_t tempo = m_os.peek32(kTempo);
+		m_os.poke32(kTempo, static_cast<uint32_t>(std::lround(std::clamp(_bpm, 30.0, 300.0) * 24.0)));
+		for(int g = 0; g < master::kGroups; ++g)
+			runMasterGroup(g, _words + master::kGroup[g].offset);
+		m_os.poke32(kTempo, tempo);
+		for(size_t i = 0; i < smoothed.size(); ++i)
+			m_os.poke16(kMasterSmoothed + 2 * static_cast<uint32_t>(i), smoothed[i]);
+	}
+
+	template<class TVoices>
+	void HostModel<TVoices>::masterWarmUpWords(const int _sets, uint32_t* _words)
+	{
+		std::array<uint8_t, master::kParams> p = master::kDefaultParams;
+		uint32_t seed = 0x1badcafe;
+		auto rnd = [&seed] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+		for(int s = 0; s < _sets; ++s)
+		{
+			if(s == 1)
+				p.fill(0);
+			else if(s == 2)
+				p.fill(127);
+			else if(s > 2)
+				for(auto& b : p)
+				{
+					const unsigned r = rnd() % 8;
+					b = static_cast<uint8_t>(r == 0 ? 0 : r == 1 ? 127 : rnd() % 128);
+				}
+			static const double kBpm[3] = {125.0, 60.0, 240.0};
+			computeMasterWords(p.data(), s < 3 ? kBpm[s] : 60.0 + static_cast<double>(rnd() % 181), _words + s * master::kWords);
+		}
 	}
 
 	template<class TVoices>
@@ -257,6 +352,12 @@ namespace md::engine
 		m_os.call(kLfoOsc, {});
 		m_os.call(kLfoApply, {});
 		m_os.call(kLevelSmooth, {});
+		{
+			// and the tail that works out the master effects' words: one group per tick, so each is refreshed every fourth
+			const int g = static_cast<int>(m_tickCount & 3);
+			runMasterGroup(g, m_masterWords.data() + master::kGroup[g].offset);
+			m_masterPending |= 1u << g;
+		}
 		if(timingOn)
 		{
 			const auto tv2 = std::chrono::steady_clock::now();

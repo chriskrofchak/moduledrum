@@ -10,7 +10,10 @@ namespace md::library
 	// What a kit sets in the engine (HostModel). Like the MD loading a kit, every track gets its machine, all 24 parameters
 	// (SYN1-8 from the kit, not the machine's defaults), its level and its LFO, so nothing of the previous kit stays.
 	// Not part of a kit, and so left alone: the output routing (HostModel::setRouting, the MD keeps it in the global
-	// settings), mutes and the tempo. The master effects, trig groups and mute groups are not modelled by the engine yet.
+	// settings), mutes and the tempo. Trig groups and mute groups are not modelled by the engine. The kit's master effects
+	// are modelled (engine::MasterFx behind the mixer) but not applied here, so that the engine's dry output and its tests
+	// stay as they are: a caller that wants them does host.setMasterFx(i, _kit.masterFx.bytes()[i]) for the 32 bytes, then
+	// the engine's primeMaster() to start at them or nothing to let them glide in, as a kit change does on the MD.
 	//
 	// As on the MD, a track takes a new machine at its next trigger. LFO values are limited to what the OS knows: 6
 	// shapes and 3 update types (the MPC port's limits, which HostModel's own clamps are looser than).

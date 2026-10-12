@@ -4,6 +4,7 @@ add_library(mdcore STATIC
   md/Firmware.cpp
   md/HostModel.cpp
   md/MachineRunner.cpp
+  md/MasterFx.cpp
   md/Mixer.cpp
   md/ParallelVoiceEngine.cpp
   md/TrackFx.cpp

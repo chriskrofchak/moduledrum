@@ -109,7 +109,7 @@ namespace
 
 		const auto fwv = md::fw::loadFirmware(_os);
 		auto c = md::fw::parseContainer(md::fw::parseSysex(md::fw::readFile(_os)));
-		md::engine::Engine eng(fwv, std::move(c.sections.at(0).data));
+		md::engine::Engine eng(fwv, std::move(c.sections.at(0).data), md::engine::EngineOptions{false});	// the dry tracks only
 		auto& host = eng.host();
 		md::library::applyKit(host, kit);
 
