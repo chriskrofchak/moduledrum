@@ -1,6 +1,7 @@
 #include "MachineRunner.h"
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 #include <stdexcept>
@@ -109,8 +110,12 @@ namespace md::engine
 			return true;
 		};
 		static const char kAnchor[] = "TRXB2PTCH";
-		const auto* hit = static_cast<const uint8_t*>(memmem(m_os.data(), m_os.size(), kAnchor, sizeof(kAnchor) - 1));
-		if(!hit || hit - m_os.data() < 5) throw std::runtime_error("machine table not found (not an MD OS 1.63 image?)");
+		// std::search rather than memmem, which MSVC's C runtime does not have (.clew increment 0021)
+		const auto* anchor = reinterpret_cast<const uint8_t*>(kAnchor);
+		const uint8_t* const osBegin = m_os.data();
+		const uint8_t* const osEnd = osBegin + m_os.size();
+		const uint8_t* hit = std::search(osBegin, osEnd, anchor, anchor + sizeof(kAnchor) - 1);
+		if(hit == osEnd || hit - osBegin < 5) throw std::runtime_error("machine table not found (not an MD OS 1.63 image?)");
 		size_t start = static_cast<size_t>(hit - m_os.data()) - 5;
 		while(start >= kRecordSize && valid(start - kRecordSize)) start -= kRecordSize;
 		for(size_t o = start; valid(o); o += kRecordSize)

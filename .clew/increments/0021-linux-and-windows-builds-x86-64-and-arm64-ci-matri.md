@@ -44,6 +44,8 @@ a Windows installer (a zip is enough for the beta; Inno Setup later), Authentico
 - [x] Verify on CI (run of dca39fb): macOS universal, Linux x64, Linux arm64 pass. Windows x64 failed in dsp.h (the fork's
       Itanium member-pointer assumption: patch 0003), Windows ARM failed to configure (the image is on VS 2026 now: generator
       "Visual Studio 18 2026"). Both fixed; the next push shows whether MSVC finds more
+- [x] Run of bd2115f: the emulator now builds on MSVC x64 and ARM64 (VS 2026 generator works); both stop at memmem in
+      MachineRunner.cpp (no memmem in MSVC's C runtime): std::search now
 - [ ] Verify on CI: Windows x64 builds and passes the OS-free tests
 - [ ] Beta: a Windows 10 x86-64 tester reports md-hash = 04ef1db4fe767721 and the VST3 loads in their DAW
 - [ ] Then: an Intel Mac or Linux x64 report closes 0018's "real hardware" task; flip build_release.sh -a to universal
