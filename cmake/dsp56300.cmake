@@ -72,7 +72,13 @@ if(WIN32 OR (UNIX AND NOT APPLE))   # dsp56kEmu links Intel's JIT profiling API 
 endif()
 foreach(t ${_dsp_libs})
   set_target_properties(${t} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_compile_options(${t} PRIVATE -w)   # third-party warnings off, in their own code and in their headers elsewhere
+  if(MSVC)
+    # as dsp56300's own build: conformance mode (without it MSVC finds DSP::writeMem ambiguous), room for its large
+    # compile-time tables, third-party warnings off
+    target_compile_options(${t} PRIVATE /w /permissive- /constexpr:steps10000000)
+  else()
+    target_compile_options(${t} PRIVATE -w)   # third-party warnings off, in their own code and in their headers elsewhere
+  endif()
   get_target_property(_inc ${t} INTERFACE_INCLUDE_DIRECTORIES)
   if(_inc)
     set_property(TARGET ${t} APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_inc})

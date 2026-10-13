@@ -1,6 +1,9 @@
-# Builds and tests Moduledrum on macOS (Apple Silicon). The tests that run the engine need the Machinedrum OS file,
-# which is not in the repository and not on the runner: they report as skipped, and the rest run. The plugin bundles are
-# uploaded as an artifact (ad-hoc signed, arm64 only: the universal installer comes from release/build_release.sh).
+# Builds and tests Moduledrum on macOS (universal), Linux (x64 and arm64) and Windows (x64; arm64 as an experiment that
+# may fail without failing the run). The tests that run the engine need the Machinedrum OS file, which is not in the
+# repository and not on any runner: they report as skipped, and the rest run. Each job uploads its zip
+# (cmake/stage_release.cmake: the plugins, the standalone, md-hash and the licence files; see docs/BETA-TESTING.md).
+# On a version tag (v1.2.3) the zips are attached to a draft GitHub release; the notarized macOS installer comes from
+# release/build_release.sh and is added to the draft by hand before it is published.
 name: build
 
 on:
@@ -15,47 +18,90 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,         platform: macos,   arch: universal, generator: Ninja,                    extra: '"-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"' }
+          - { os: ubuntu-24.04,     platform: linux,   arch: x64,       generator: Ninja,                    extra: '' }
+          - { os: ubuntu-24.04-arm, platform: linux,   arch: arm64,     generator: Ninja,                    extra: '' }
+          - { os: windows-2022,     platform: windows, arch: x64,       generator: 'Visual Studio 17 2022',  extra: '-A x64' }
+          # Windows on ARM: JUCE supports it and dsp56300 selects its aarch64 JIT for MSVC's _M_ARM64, but nobody has built
+          # this emulator there yet
+          - { os: windows-11-arm,   platform: windows, arch: arm64,     generator: 'Visual Studio 17 2022',  extra: '-A ARM64', experimental: true }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       # ext/dsp56300 (with its asmjit) and ext/mc68k are submodules
       - uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - name: Install Ninja
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libasound2-dev libjack-jackd2-dev libfreetype-dev \
+            libfontconfig1-dev libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxrender-dev libgl1-mesa-dev libcurl4-openssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Ninja (macOS)
+        if: matrix.platform == 'macos'
         run: brew install ninja
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMD_BUILD_PLUGIN=ON -DMD_COPY_PLUGINS=OFF -DMD_USE_JIT=ON
+        shell: bash
+        run: >
+          cmake -S . -B build -G "${{ matrix.generator }}" ${{ matrix.extra }}
+          -DCMAKE_BUILD_TYPE=Release -DMD_BUILD_PLUGIN=ON -DMD_COPY_PLUGINS=OFF -DMD_USE_JIT=ON
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --config Release --parallel
 
-      # romart, firmware, golden-hash, kits, jit, resampler and plugin-* (the ones that need MD_OS_SYX skip themselves)
+      # romart, firmware, golden-hash, kits, jit, resampler, master-*, plugin-* (the ones that need MD_OS_SYX skip themselves)
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure
 
-      # The build signs each bundle with the hardened runtime and the JIT entitlements (cmake/codesign.cmake)
-      - name: Verify the signatures
+      # The macOS build signs each bundle with the hardened runtime and the JIT entitlements (cmake/codesign.cmake)
+      - name: Verify the signatures (macOS)
+        if: matrix.platform == 'macos'
         run: |
           art=build/src/plugin/MdOne_artefacts/Release
           for b in "$art/AU/Moduledrum.component" "$art/VST3/Moduledrum.vst3" "$art/Standalone/Moduledrum.app"; do
             codesign --verify --strict --deep --verbose=2 "$b"
+            lipo -archs "$b/Contents/MacOS/Moduledrum"
           done
           ents="$(codesign -d --entitlements - "$art/Standalone/Moduledrum.app" 2>/dev/null)"
           echo "$ents"
           [[ "$ents" == *com.apple.security.cs.allow-jit* ]]
 
-      # ditto keeps the executable bits and the signatures; upload-artifact alone would drop them
-      - name: Zip the bundles
-        run: |
-          art=build/src/plugin/MdOne_artefacts/Release
-          mkdir -p dist
-          ditto -c -k --keepParent "$art/AU/Moduledrum.component" dist/Moduledrum-AU.zip
-          ditto -c -k --keepParent "$art/VST3/Moduledrum.vst3" dist/Moduledrum-VST3.zip
-          ditto -c -k --keepParent "$art/Standalone/Moduledrum.app" dist/Moduledrum-Standalone.zip
+      - name: Stage the zip
+        shell: bash
+        run: >
+          cmake -DBUILD_DIR=build -DOUT_DIR=dist -DPLATFORM=${{ matrix.platform }} -DARCH=${{ matrix.arch }}
+          -P cmake/stage_release.cmake
 
       - uses: actions/upload-artifact@v7
         with:
-          name: moduledrum-macos-arm64
-          path: dist/*.zip
+          name: moduledrum-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          files: |
+            dist/*.zip
+            dist/*.sha256

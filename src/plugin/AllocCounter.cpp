@@ -6,8 +6,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <thread>
 #include <unordered_map>
-#include <pthread.h>
+#if defined(_WIN32)
+#include <malloc.h>   // _aligned_malloc / _aligned_free
+#endif
 #if defined(__APPLE__)
 #include <dlfcn.h>
 #include <execinfo.h>
@@ -20,12 +23,12 @@ namespace md::plugin::check {
 namespace {
 
 std::atomic<bool> g_active{false};
-pthread_t g_thread{};
+std::thread::id g_thread{};   // written before g_active's release store, read after its acquire load
 std::atomic<uint64_t> g_all{0}, g_news{0};
 
 inline bool counting()
 {
-    return g_active.load(std::memory_order_acquire) && pthread_equal(pthread_self(), g_thread);
+    return g_active.load(std::memory_order_acquire) && std::this_thread::get_id() == g_thread;
 }
 
 // The call stack of each allocation while counting, sorted by end(); those past the table stay unsorted (and so count
@@ -94,17 +97,31 @@ void* allocate(std::size_t size)
     }
 }
 
+// Over-aligned allocation and its free: the C runtime's aligned pair on Windows, posix_memalign/free elsewhere
 void* allocateAligned(std::size_t size, std::align_val_t al)
 {
     countNew();
     const auto align = std::max(std::size_t(al), sizeof(void*));
     for (;;) {
+#if defined(_WIN32)
+        if (void* p = _aligned_malloc(size == 0 ? 1 : size, align)) return p;
+#else
         void* p = nullptr;
         if (posix_memalign(&p, align, size == 0 ? 1 : size) == 0) return p;
+#endif
         auto handler = std::get_new_handler();
         if (handler == nullptr) return nullptr;
         handler();
     }
+}
+
+void freeAligned(void* p) noexcept
+{
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
 }
 
 } // namespace
@@ -117,7 +134,7 @@ void AllocCounter::begin()
     g_stackCount.store(0);
     g_all.store(0);
     g_news.store(0);
-    g_thread = pthread_self();
+    g_thread = std::this_thread::get_id();
     g_active.store(true, std::memory_order_release);
 }
 
@@ -179,6 +196,7 @@ std::string AllocCounter::report(int maxStacks)
 
 using md::plugin::check::allocate;
 using md::plugin::check::allocateAligned;
+using md::plugin::check::freeAligned;
 
 void* operator new(std::size_t n) { if (void* p = allocate(n)) return p; throw std::bad_alloc(); }
 void* operator new[](std::size_t n) { if (void* p = allocate(n)) return p; throw std::bad_alloc(); }
@@ -194,9 +212,9 @@ void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
 void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
-void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
-void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
-void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { freeAligned(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { freeAligned(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { freeAligned(p); }

@@ -230,6 +230,41 @@ So the repo's x86_64 slice is still opt-in (the release script builds arm64 unle
 so): the Z fix is in the patch and verified under Rosetta (the tests fail without it, the lockstep render is clean), but
 there has been no Intel hardware. Once a real Intel Mac has run the full ctest, the universal build can become the default.
 
+## Linux and Windows (increment 0021, 2026-10-12)
+
+Monomodule ships Linux and Windows with the same emulator and the same JUCE shell, so Moduledrum follows its recipe.
+Target architectures: arm64 (Apple Silicon, Linux aarch64, Windows on ARM as an experiment) and x86-64 (Intel Mac,
+Linux, Windows 10 1803+). 32-bit ARM would be interpreter-only (dsp56300 has no A32 JIT; the MPC port used a static
+recompiler we left behind) and anything else has no JIT back end at all: out of scope.
+
+- **Nothing in the engine is platform-specific.** The only platform code was in the development tools: the allocation
+  counter (`malloc_logger`, Apple only, still so) and `md-plugin-check`'s settings folder (`mkdtemp`/`setenv`, now a
+  JUCE random folder and `_putenv_s` on Windows; `AllocCounter.cpp` uses `std::thread::id` and `_aligned_malloc`).
+- **MSVC** (as Monomodule): `_USE_MATH_DEFINES NOMINMAX _CRT_SECURE_NO_WARNINGS`, `/utf-8 /bigobj`, a static C runtime
+  (`CMAKE_MSVC_RUNTIME_LIBRARY`, policy CMP0091 defaulted NEW for dsp56300's sub-projects), and
+  `/w /permissive- /constexpr:steps10000000` on the emulator libraries where the others get `-w`. `MD_OS_SYX` is passed
+  through `file(TO_CMAKE_PATH)` so a Windows path's backslashes do not become escape sequences in the string literal.
+- **The emulator on each platform:** memory is mapped through `MmuHelper` (`shm_open` + `mmap` on Linux and macOS,
+  `VirtualAlloc2` with a legacy fallback on Windows, so Windows 10 1803+); the JIT's executable memory is asmjit's
+  (needs the JIT entitlements under macOS's hardened runtime, nothing elsewhere). On Linux `/dev/shm` must hold the
+  DSPs' memory: Docker needs `--shm-size=1g`. The x86-64 builds run the x64 back end with fix 4 of the patch; the
+  aarch64 builds the back end every hash here was established with.
+- **CI** (`.github/workflows/build.yml`): macos-14 universal, ubuntu-24.04, ubuntu-24.04-arm, windows-2022 (x64),
+  windows-11-arm (`continue-on-error`). Each runs ctest (the OS-file tests skip) and uploads
+  `Moduledrum-<version>-<platform>-<arch>.zip` made by `cmake/stage_release.cmake`: `VST3/`, `Standalone/`, `AU/` on
+  macOS, `Tools/md-hash`, licences, `BETA-TESTING.md`. A `v*` tag attaches them to a draft release.
+- **The beta check** (`docs/BETA-TESTING.md`): a tester runs `md-hash` with their own OS file and reports whether it
+  prints `04ef1db4fe767721`; `MD_JIT_LOCKSTEP=1` gives the first diverging instruction otherwise. The first Windows or
+  Linux x64 report with the right hash is what closes 0018's "real x86-64 hardware" task.
+- **The Linux build found one real bug:** `cmake/mc68k.cmake` put the mc68k checkout itself on the include path, and
+  its `endian.h` shadowed glibc's `<endian.h>`: JUCE's C sources (SheenBidi) failed to compile, and every C++ file that
+  got the directory silently read the wrong header too. Now only the checkout's parent is on the path
+  (`mc68k/mc68k.h`, `mc68k/Musashi/m68k.h`), and 68kEmu is a private dependency of mdcore (only `MachineRunner.cpp`
+  includes it).
+- **Verified here:** macOS arm64 builds, 16/16 tests with the OS and kit files, `md-hash` `04ef1db4fe767721`, the staging
+  zip complete; Linux aarch64 in an Ubuntu 24.04 container (GCC 13.3, Docker on this Mac) the same suite. Windows
+  compiles only on CI: the first push is its first MSVC build.
+
 ## Decisions (made, not to be re-litigated without a reason)
 
 - **Render synchronously in `processBlock`** (Monomodule's pattern), not on a render-ahead thread. The engine is fast
@@ -310,6 +345,9 @@ verification of their claims.
   echo and reverb feedback, a free-running modulation phase) belongs with 0013; a C++ translation (B, with
   `tests/Dsp1Reference` as the oracle) only if RAM or CPU ever ask for it; the control machines (CTR-RE/GB/EQ/DX, which
   drive the master parameters from a track) are not modelled; the x64 JIT has never run DSP1's program.
+- **0021 Linux and Windows** (in progress): the code, CI matrix, staging script and tester guide are in; left is the
+  first CI run on a push, a Windows 10 x86-64 tester's `md-hash` report, and then flipping `build_release.sh -a` to
+  universal (0018).
 - **0006 ROM machines and factory kits** need a flash image from a real Machinedrum UW; the MPC port's `tools/mdkits`
   shows how to extract the sample memory and the 16 factory kits by booting the emulated machine.
 - Not modelled at all: the sequencer (patterns, songs, parameter locks, trigger groups), audio input (INP machines),

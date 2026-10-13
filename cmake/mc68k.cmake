@@ -15,7 +15,14 @@ endfunction()
 _md_add_mc68k()
 
 set_target_properties(68kEmu PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_compile_options(68kEmu PRIVATE -w)
-# Consumers include "mc68k/mc68k.h" and "Musashi/m68k.h"
+if(MSVC)
+  target_compile_options(68kEmu PRIVATE /w)
+else()
+  target_compile_options(68kEmu PRIVATE -w)
+endif()
+# Consumers include "mc68k/mc68k.h" and "mc68k/Musashi/m68k.h": only the checkout's parent is on the include path. The
+# checkout itself must not be: it has an endian.h, which would shadow glibc's <endian.h> for every file that gets these
+# include directories (JUCE's C sources failed on Linux with it; .clew increment 0021). The wrapper's own headers find
+# each other relative to their own directory.
 get_filename_component(_mc68k_parent "${MD_MC68K_DIR}" DIRECTORY)
-target_include_directories(68kEmu SYSTEM INTERFACE "${_mc68k_parent}" "${MD_MC68K_DIR}")
+target_include_directories(68kEmu SYSTEM INTERFACE "${_mc68k_parent}")

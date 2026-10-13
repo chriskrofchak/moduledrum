@@ -91,7 +91,6 @@
 #include <set>
 #include <thread>
 #include <vector>
-#include <unistd.h>   // mkdtemp
 #include "golden/GoldenPattern.h"
 #include "md/library/KitApply.h"
 #include "md/library/MdSysex.h"
@@ -125,10 +124,19 @@ struct CheckAbort {};
     throw CheckAbort{};
 }
 
-// A check's own settings folder, which MD_SETTINGS_DIR names for the processors: new for every run (mkdtemp under the temp
-// directory, ~/Library/Caches/<executable name> on macOS), so two runs at once (two worktrees' ctest, a parallel loop) never
-// share one or delete each other's OS-file setting, and removed again when the check returns, whichever way it does. The
-// caller's own MD_SETTINGS_DIR is replaced: the checks never touch the user's real settings.
+void setEnvironmentVariable(const char* name, const juce::String& value)
+{
+#if defined(_WIN32)
+    _putenv_s(name, value.toRawUTF8());
+#else
+    setenv(name, value.toRawUTF8(), 1);
+#endif
+}
+
+// A check's own settings folder, which MD_SETTINGS_DIR names for the processors: new for every run (a random name under the
+// temp directory, ~/Library/Caches/<executable name> on macOS, created exclusively, as mkdtemp does), so two runs at once (two
+// worktrees' ctest, a parallel loop) never share one or delete each other's OS-file setting, and removed again when the check
+// returns, whichever way it does. The caller's own MD_SETTINGS_DIR is replaced: the checks never touch the user's real settings.
 struct ScopedSettingsDir {
     juce::File dir;
 
@@ -136,10 +144,13 @@ struct ScopedSettingsDir {
     {
         const auto root = juce::File::getSpecialLocation(juce::File::tempDirectory);
         root.createDirectory();
-        auto path = (root.getFullPathName() + "/md-plugin-check-" + name + "-XXXXXX").toStdString();
-        if (!mkdtemp(path.data())) abortCheck("no settings folder in " + root.getFullPathName());
-        dir = juce::File(juce::String(path));
-        setenv("MD_SETTINGS_DIR", dir.getFullPathName().toRawUTF8(), 1);
+        auto& random = juce::Random::getSystemRandom();
+        for (int attempt = 0; dir == juce::File{}; ++attempt) {
+            const auto candidate = root.getChildFile(juce::String("md-plugin-check-") + name + "-" + juce::String::toHexString(random.nextInt64()));
+            if (!candidate.exists() && candidate.createDirectory().wasOk()) dir = candidate;
+            else if (attempt >= 100) abortCheck("no settings folder in " + root.getFullPathName());
+        }
+        setEnvironmentVariable("MD_SETTINGS_DIR", dir.getFullPathName());
     }
     ~ScopedSettingsDir() { dir.deleteRecursively(); }
     ScopedSettingsDir(const ScopedSettingsDir&) = delete;

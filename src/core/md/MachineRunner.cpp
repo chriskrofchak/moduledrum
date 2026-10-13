@@ -7,7 +7,7 @@
 
 #include "mc68k/mc68k.h"
 #include "mc68k/cpuState.h"
-#include "Musashi/m68k.h"
+#include "mc68k/Musashi/m68k.h"
 
 namespace md::engine
 {

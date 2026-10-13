@@ -90,8 +90,23 @@ Moduledrum reads it each time it starts and never copies it or redistributes it.
 
 ## Installing a release
 
-`release/build_release.sh` (see [Making a release](#making-a-release)) makes the two downloads of a release. Both hold
-the same three bundles:
+Downloads are on the project's **Releases** page (and, for every commit, as artifacts of the `build` workflow on
+GitHub Actions). One zip per platform, each with `VST3/`, `Standalone/`, `Tools/md-hash` (the exactness check, see
+[docs/BETA-TESTING.md](docs/BETA-TESTING.md)) and the licence files; the macOS one has `AU/` too:
+
+| Platform | Download | Plugins go to |
+|---|---|---|
+| macOS 12+ (Apple Silicon and Intel) | `Moduledrum-<version>-macos-universal.zip`, or the installer below | `~/Library/Audio/Plug-Ins/Components/` and `.../VST3/` |
+| Windows 10 (1803+) and 11, x64 | `Moduledrum-<version>-windows-x64.zip` | `C:\Program Files\Common Files\VST3\` |
+| Windows 11 on ARM (experimental) | `Moduledrum-<version>-windows-arm64.zip` | the same |
+| Linux x64 and arm64 | `Moduledrum-<version>-linux-x64.zip`, `-linux-arm64.zip` | `~/.vst3/` |
+
+There is no AU on Windows or Linux (Audio Units are macOS only), and no Windows installer or Authenticode signature
+yet: SmartScreen warns on the first start of the standalone or `md-hash` (*More info*, *Run anyway*). On Linux the
+emulator keeps the DSPs' memory in `/dev/shm`; a Docker container needs `--shm-size=1g`.
+
+On macOS, `release/build_release.sh` (see [Making a release](#making-a-release)) also makes the two macOS downloads of
+a release. Both hold the same three bundles:
 
 - **`Moduledrum-<version>-macos-arm64.pkg`**, the installer. Open it, click through, and use *Customize* to leave out
   what you don't want. It installs for all users:
@@ -109,9 +124,10 @@ the same three bundles:
 Then rescan the plugins in your host (Logic scans Audio Units at launch) and
 [select your OS file](#getting-the-os-file) the first time Moduledrum opens. Nothing of Elektron's is in either file.
 
-**Apple Silicon only so far.** A universal build with an Intel (x86_64) slice can be made (see
-[Building](#universal-binary-and-intel)), but dsp56300's x64 JIT is not yet trusted, see
-[Known limitations](#known-limitations).
+**Intel, Windows and Linux are in beta.** The macOS zip and the installer made with `-a universal` carry an Intel
+(x86_64) slice, and the Windows and Linux x64 zips run the same x86-64 JIT back end, which has only run under Rosetta
+so far (see [Known limitations](#known-limitations)). Every zip has `Tools/md-hash`, whose one-line output says whether
+the emulation is exact on your machine: [docs/BETA-TESTING.md](docs/BETA-TESTING.md).
 
 **Gatekeeper.** A release that is signed with a Developer ID certificate and notarized opens without questions. One
 that is not (a build you made yourself, or a release published ad-hoc signed) is blocked while it carries the
@@ -128,6 +144,9 @@ xattr -dr com.apple.quarantine /Applications/Moduledrum.app \
 ## Building from source
 
 ### Requirements
+
+Moduledrum builds on macOS, Linux and Windows. The commands below are for macOS; [Linux](#linux) and
+[Windows](#windows) follow.
 
 - macOS 12 or newer, with Xcode or the Xcode command line tools (`xcode-select --install`)
 - CMake 3.22 or newer, Git and, optionally, [Ninja](https://ninja-build.org)
@@ -151,13 +170,49 @@ What you get:
 | `build/src/cli/md-hash`, `md-machines`, `md-kits`, `md-voicediag` | the command-line tools |
 | `build/src/plugin/MdPluginCheck_artefacts/Release/MdPluginCheck` | `md-plugin-check`, the plugin's headless checks |
 
+### Linux
+
+On Debian or Ubuntu (other distributions: the same libraries under their own names):
+
+```bash
+sudo apt install build-essential cmake git ninja-build pkg-config \
+  libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+  libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+  libgl1-mesa-dev libcurl4-openssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+git submodule update --init --recursive
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+The build copies the VST3 to `~/.vst3/`; the standalone is `build/src/plugin/MdOne_artefacts/Release/Standalone/Moduledrum`.
+x86-64 runs dsp56300's x64 JIT, aarch64 its aarch64 JIT (the one every hash in this README was established with).
+The emulator keeps the DSPs' memory in `/dev/shm`: a Docker container needs `--shm-size=1g` or the engine stops at boot.
+
+### Windows
+
+Needs Visual Studio 2022 with the *Desktop development with C++* workload (Windows 10 1803 or later to run: the
+emulator's memory mapper uses `VirtualAlloc2`). In a *Developer PowerShell for VS 2022*:
+
+```powershell
+git submodule update --init --recursive
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The VST3 is `build\src\plugin\MdOne_artefacts\Release\VST3\Moduledrum.vst3`: copy it to
+`C:\Program Files\Common Files\VST3\`, or configure with `-DMD_COPY_PLUGINS=ON` from an administrator prompt. The
+standalone is `...\Standalone\Moduledrum.exe`, `md-hash` is `build\src\cli\Release\md-hash.exe`. The C runtime is
+linked statically, so nothing needs the Visual C++ redistributable. `-A ARM64` on a Windows-on-ARM machine builds for
+it (experimental: dsp56300 selects its aarch64 JIT for MSVC's `_M_ARM64`, but it has not been run there).
+
 ### Build options
 
 | Option | Default | Meaning |
 |---|---|---|
 | `MD_BUILD_PLUGIN` | `ON` | Build the plugin. `OFF` builds only the engine, the tests and the command-line tools. |
 | `MD_BUILD_TESTS` | `ON` | Build the unit tests. |
-| `MD_COPY_PLUGINS` | `ON` | Copy the plugins to `~/Library/Audio/Plug-Ins/` after each build. |
+| `MD_COPY_PLUGINS` | `ON` (`OFF` on Windows) | Copy the plugins to the user's plugin folders (`~/Library/Audio/Plug-Ins/`, `~/.vst3/`; the system VST3 folder on Windows) after each build. |
 | `MD_OS_SYX` | *(empty)* | Path to your OS file. Used by the tests and the command-line tools. |
 | `MD_USE_JIT` | `ON` | Run the emulated DSP on dsp56300's JIT. `OFF` uses its interpreter: the same audio, bit for bit, at about four times the CPU. The configure step applies `ext/patches/0001-dsp56300-md.patch` (JIT fixes) to the `ext/dsp56300` checkout, so that submodule shows as modified. |
 | `MD_CODESIGN_IDENTITY` | `-` | What the plugin bundles are signed with after each build: `-` is ad-hoc (runs on this Mac only), or the name of a "Developer ID Application" certificate. See [Signing](#signing). |
@@ -233,8 +288,11 @@ release/build_release.sh -v 0.1.0 -s "Developer ID Application: Your Name (TEAMI
 `-n` signs with Apple's timestamp, submits the installer with `notarytool submit --wait`, staples the ticket to it
 and to the three bundles, and only then writes the `.zip`. `MD_CMAKE_ARGS` adds arguments to the configure step (for
 example `-DFETCHCONTENT_SOURCE_DIR_JUCE=<a JUCE 8.0.9 checkout>`). Nothing derived from the OS file is ever packaged:
-the plugin asks for it at run time. GitHub Actions (`.github/workflows/build.yml`) builds and tests every push on an
-Apple Silicon runner and uploads the arm64 bundles; the tests that need the OS file are skipped there.
+the plugin asks for it at run time. GitHub Actions (`.github/workflows/build.yml`) builds and tests every push on
+macOS (universal), Linux (x64 and arm64) and Windows (x64; arm64 as an experiment) and uploads one zip per platform,
+made by `cmake/stage_release.cmake` (the plugins, the standalone, `md-hash` and the licence files; the same script
+works locally: `cmake -DBUILD_DIR=build -DOUT_DIR=dist -DPLATFORM=linux -P cmake/stage_release.cmake`). The tests
+that need the OS file are skipped there. A `v*` tag attaches the zips to a draft release.
 
 ### Tests
 
@@ -293,9 +351,11 @@ The engine in `src/core/md` is sd88me's, vendored from Machinemodule for MPC OS
   about 5% of one core on `md-hash`'s sparse pattern and about 7% with every track retriggered 8 times per beat, and
   the master effects add about 2% (9% in all; the interpreter: 18% and 32% without them). An idle instance still runs
   the whole DSP every block.
-- **macOS only** for now. Releases are arm64 (Apple Silicon); the x86_64 slice of a universal build is experimental: the
-  x64 JIT leaves the Z flag set after one LSL loop (the audio is unaffected so far) and no Intel Mac has run it, see
-  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+- **x86-64 is in beta.** Apple Silicon (and Linux aarch64) run the aarch64 JIT back end, the one every hash above
+  was established with. Intel Macs, Windows x64 and Linux x64 run dsp56300's x64 back end, which has had one bug fixed
+  by this project (fix 4 of `ext/patches/0001-dsp56300-md.patch`, found in lockstep under Rosetta) and has not yet
+  run on a real x86-64 machine. `Tools/md-hash` in every download answers that in one line
+  ([docs/BETA-TESTING.md](docs/BETA-TESTING.md)); 32-bit ARM and other architectures have no JIT and are out of scope.
 
 ## Settings and data
 

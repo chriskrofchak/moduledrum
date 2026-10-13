@@ -16,7 +16,8 @@ add_library(mdcore STATIC
 target_include_directories(mdcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # The vendored headers are system headers to their consumers: upstream code under the plugin's stricter JUCE warning flags
 target_include_directories(mdcore SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/md)
-target_link_libraries(mdcore PUBLIC dsp56kEmu 68kEmu)
+# 68kEmu is private: only MachineRunner.cpp includes it (its headers must not reach consumers, see cmake/mc68k.cmake)
+target_link_libraries(mdcore PUBLIC dsp56kEmu PRIVATE 68kEmu)
 
 # RAM per emulated DSP (increment 0009): a booted DSP took 358 MB (JIT; the MPC port's HANDOFF said 420-500), two of them in the
 # engine with the master effects 837 MB. Two causes, both in the emulator's defaults:

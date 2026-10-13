@@ -16,6 +16,15 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
+if(MSVC)
+  # As Monomodule (.clew increment 0021): M_PI, no min/max macros from windows.h, no "unsafe" CRT function warnings,
+  # UTF-8 sources, room for the emulators' large object files. Static C runtime: the plugins and tools need no Visual C++
+  # redistributable (the policy default makes dsp56300's sub-projects, cmake_minimum_required 3.10, honour it too).
+  add_compile_definitions(_USE_MATH_DEFINES NOMINMAX _CRT_SECURE_NO_WARNINGS)
+  add_compile_options(/utf-8 /bigobj)
+  set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 option(MD_BUILD_PLUGIN "Build the plugins (needs JUCE, downloaded at configure time)" ON)
 option(MD_BUILD_TESTS  "Build the unit tests" ON)
@@ -29,6 +38,9 @@ option(MD_USE_JIT "Run the emulated DSP on dsp56300's JIT (OFF: its interpreter;
 # engine (they are skipped without it; the MD_OS_SYX environment variable overrides it). The plugins never use it:
 # they ask for the file at run time.
 set(MD_OS_SYX "" CACHE FILEPATH "Optional: path to Elektron_SPS1-1UW_OS1.63.syx for the tests and CLI tools")
+# The path reaches the tools as a string literal (MD_OS_SYX="..."): forward slashes, so that a Windows path's backslashes
+# are not read as escape sequences.
+file(TO_CMAKE_PATH "${MD_OS_SYX}" MD_OS_SYX)
 
 include(cmake/dsp56300.cmake)
 include(cmake/mc68k.cmake)
