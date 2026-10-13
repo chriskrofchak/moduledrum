@@ -286,6 +286,9 @@ recompiler we left behind) and anything else has no JIT back end at all: out of 
 
 ## Decisions (made, not to be re-litigated without a reason)
 
+- **Green across the matrix** (run 38337861510 of 45f5045): macOS universal, Linux x64 and arm64, Windows x64 and the
+  experimental Windows ARM64 all build, pass the OS-free tests and upload their zips. Windows has not run with the OS file yet:
+  that is the beta tester's `md-hash`.
 - **Render synchronously in `processBlock`** (Monomodule's pattern), not on a render-ahead thread. The engine is fast
   enough and the latency is lower. Engine swaps (OS load) happen under a lock that `processBlock` only tries.
 - **Engine rate 44.1 kHz**, the hardware's; other host rates go through Monomodule's band-limited resampler.

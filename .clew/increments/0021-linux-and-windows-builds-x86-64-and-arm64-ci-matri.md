@@ -48,7 +48,8 @@ a Windows installer (a zip is enough for the beta; Inno Setup later), Authentico
       MachineRunner.cpp (no memmem in MSVC's C runtime): std::search now
 - [x] Run of cee216d: Windows x64 AND arm64 build the VST3, the standalone, md-hash and every test executable; the one
       failure is md-plugin-check (Check.cpp: MSVC wants a constexpr local captured by a lambda; static constexpr now)
-- [ ] Verify on CI: Windows x64 passes the OS-free tests and uploads its zip
+- [x] Verify on CI (run 38337861510 of 45f5045, 2026-10-12 night): all five jobs green, including Windows x64 and the
+      experimental Windows ARM64; artifacts moduledrum-{macos-universal,linux-x64,linux-arm64,windows-x64,windows-arm64}
 - [ ] Beta: a Windows 10 x86-64 tester reports md-hash = 04ef1db4fe767721 and the VST3 loads in their DAW
 - [ ] Then: an Intel Mac or Linux x64 report closes 0018's "real hardware" task; flip build_release.sh -a to universal
 
