@@ -1097,7 +1097,7 @@ int checkMaster(const juce::String& os, const juce::String& kitsPath)
     const auto& settingsDir = scratch.dir;
     md::plugin::saveSharedOsPath(os);
     using NoteMap = MdOneProcessor::NoteMap;
-    constexpr int kLatency = MdOneProcessor::kMasterLatency;
+    static constexpr int kLatency = MdOneProcessor::kMasterLatency;   // static: MSVC wants a plain constexpr local captured by the lambdas below
 
     // master_fx on by default; the latency and the tail follow it; the first live callback compiles nothing in the master
     {

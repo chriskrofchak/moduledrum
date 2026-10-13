@@ -46,7 +46,9 @@ a Windows installer (a zip is enough for the beta; Inno Setup later), Authentico
       "Visual Studio 18 2026"). Both fixed; the next push shows whether MSVC finds more
 - [x] Run of bd2115f: the emulator now builds on MSVC x64 and ARM64 (VS 2026 generator works); both stop at memmem in
       MachineRunner.cpp (no memmem in MSVC's C runtime): std::search now
-- [ ] Verify on CI: Windows x64 builds and passes the OS-free tests
+- [x] Run of cee216d: Windows x64 AND arm64 build the VST3, the standalone, md-hash and every test executable; the one
+      failure is md-plugin-check (Check.cpp: MSVC wants a constexpr local captured by a lambda; static constexpr now)
+- [ ] Verify on CI: Windows x64 passes the OS-free tests and uploads its zip
 - [ ] Beta: a Windows 10 x86-64 tester reports md-hash = 04ef1db4fe767721 and the VST3 loads in their DAW
 - [ ] Then: an Intel Mac or Linux x64 report closes 0018's "real hardware" task; flip build_release.sh -a to universal
 
