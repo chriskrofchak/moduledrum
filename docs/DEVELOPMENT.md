@@ -249,6 +249,13 @@ recompiler we left behind) and anything else has no JIT back end at all: out of 
   (needs the JIT entitlements under macOS's hardened runtime, nothing elsewhere). On Linux `/dev/shm` must hold the
   DSPs' memory: Docker needs `--shm-size=1g`. The x86-64 builds run the x64 back end with fix 4 of the patch; the
   aarch64 builds the back end every hash here was established with.
+- **MSVC found a second one, in the emulator fork:** `dsp.h`'s arm32 static-recompiler helpers (`callInstruction`,
+  `getRecompInfo`, the MPC port's work, unused here) rebuild a member pointer by copying an Itanium `{ptr, adjustment}`
+  pair into it and asserted that layout; MSVC's member pointer to a class without bases is one pointer, so every file
+  including `dsp.h` failed (`error C2338`). `ext/patches/0003-dsp56300-md-msvc.patch` copies `sizeof(member pointer)`
+  bytes instead, right on both ABIs; `src/core/CMakeLists.txt` applies it at configure time as it applies 0002.
+- **The `windows-11-arm` runner image moved to Visual Studio 2026** in September 2026 (actions/runner-images#14602), so
+  that job uses CMake's "Visual Studio 18 2026" generator; `windows-2022` keeps Visual Studio 2022.
 - **CI** (`.github/workflows/build.yml`): macos-14 universal, ubuntu-24.04, ubuntu-24.04-arm, windows-2022 (x64),
   windows-11-arm (`continue-on-error`). Each runs ctest (the OS-file tests skip) and uploads
   `Moduledrum-<version>-<platform>-<arch>.zip` made by `cmake/stage_release.cmake`: `VST3/`, `Standalone/`, `AU/` on
@@ -261,9 +268,10 @@ recompiler we left behind) and anything else has no JIT back end at all: out of 
   got the directory silently read the wrong header too. Now only the checkout's parent is on the path
   (`mc68k/mc68k.h`, `mc68k/Musashi/m68k.h`), and 68kEmu is a private dependency of mdcore (only `MachineRunner.cpp`
   includes it).
-- **Verified here:** macOS arm64 builds, 16/16 tests with the OS and kit files, `md-hash` `04ef1db4fe767721`, the staging
-  zip complete; Linux aarch64 in an Ubuntu 24.04 container (GCC 13.3, Docker on this Mac) the same suite. Windows
-  compiles only on CI: the first push is its first MSVC build.
+- **Verified:** macOS arm64 builds, 16/16 tests with the OS and kit files, `md-hash` `04ef1db4fe767721`, the staging
+  zip complete; Linux aarch64 in an Ubuntu 24.04 container (GCC 13.3, Docker on this Mac) the same suite; on CI the
+  macOS universal, Linux x64 and Linux arm64 jobs pass. Windows compiles only on CI; the two fixes above came out of its
+  first run, and the next push shows whether MSVC has more to say.
 
 ## Decisions (made, not to be re-litigated without a reason)
 

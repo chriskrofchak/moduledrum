@@ -41,7 +41,10 @@ a Windows installer (a zip is enough for the beta; Inno Setup later), Authentico
 - [x] Verify: Linux aarch64 in an Ubuntu 24.04 Docker container (GCC 13.3), 15/16 with the OS and kit files (plugin-rt
       skips: its malloc hook is macOS-only), md-hash 04ef1db4fe767721, the linux-arm64 zip staged. Finding: ext/mc68k on the include path shadowed glibc's <endian.h> (JUCE's C sources failed); fixed in cmake/mc68k.cmake,
       src/core/CMakeLists.txt (68kEmu private) and MachineRunner.cpp (mc68k/Musashi/m68k.h)
-- [ ] Verify on CI: Linux x64 and arm64 and Windows x64 build and pass the OS-free tests (needs a push)
+- [x] Verify on CI (run of dca39fb): macOS universal, Linux x64, Linux arm64 pass. Windows x64 failed in dsp.h (the fork's
+      Itanium member-pointer assumption: patch 0003), Windows ARM failed to configure (the image is on VS 2026 now: generator
+      "Visual Studio 18 2026"). Both fixed; the next push shows whether MSVC finds more
+- [ ] Verify on CI: Windows x64 builds and passes the OS-free tests
 - [ ] Beta: a Windows 10 x86-64 tester reports md-hash = 04ef1db4fe767721 and the VST3 loads in their DAW
 - [ ] Then: an Intel Mac or Linux x64 report closes 0018's "real hardware" task; flip build_release.sh -a to universal
 

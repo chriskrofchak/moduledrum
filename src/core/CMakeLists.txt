@@ -31,24 +31,39 @@ target_compile_definitions(dsp56kEmu PUBLIC DSP56300_AUDIO_RINGBUFFER_SIZE=64)
 #   either way (it is memory accounting, not emulation).
 set(MD_DSP56300_MEMORY_PATCH "${CMAKE_SOURCE_DIR}/ext/patches/0002-dsp56300-md-memory.patch" CACHE FILEPATH
     "Patch for the emulator's memory footprint (no mlock), applied after MD_DSP56300_PATCH; empty = none")
-if(MD_DSP56300_PATCH AND MD_DSP56300_MEMORY_PATCH AND EXISTS "${MD_DSP56300_MEMORY_PATCH}")
+# - MSVC (increment 0021): the fork's arm32 recompiler helpers in dsp.h assume the Itanium member-pointer layout, which MSVC
+#   does not have; ext/patches/0003-dsp56300-md-msvc.patch makes them ABI-agnostic. Applied everywhere (one checkout serves
+#   every platform); it changes nothing the emulation does.
+set(MD_DSP56300_MSVC_PATCH "${CMAKE_SOURCE_DIR}/ext/patches/0003-dsp56300-md-msvc.patch" CACHE FILEPATH
+    "Patch for building the emulator with MSVC, applied after MD_DSP56300_PATCH; empty = none")
+# Each applied here, idempotently, as cmake/dsp56300.cmake applies 0001 (when MD_DSP56300_PATCH is set, i.e. when this
+# project's patches are wanted); a checkout that cannot take one just goes without it (a warning says so).
+function(_md_apply_dsp56300_patch _patch _what)
+  if(NOT _patch OR NOT EXISTS "${_patch}")
+    return()
+  endif()
   find_package(Git QUIET)
-  if(GIT_FOUND)
-    set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-                 "${MD_DSP56300_MEMORY_PATCH}" "${MD_DSP56300_DIR}/source/dsp56kBase/mmuhelper.cpp")
-    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn --reverse --check "${MD_DSP56300_MEMORY_PATCH}"
-                    WORKING_DIRECTORY "${MD_DSP56300_DIR}" RESULT_VARIABLE _md_mem_applied OUTPUT_QUIET ERROR_QUIET)
-    if(NOT _md_mem_applied EQUAL 0)
-      execute_process(COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn "${MD_DSP56300_MEMORY_PATCH}"
-                      WORKING_DIRECTORY "${MD_DSP56300_DIR}" RESULT_VARIABLE _md_mem_result OUTPUT_QUIET ERROR_QUIET)
-      if(_md_mem_result EQUAL 0)
-        message(STATUS "dsp56300: applied ${MD_DSP56300_MEMORY_PATCH}")
-      else()
-        message(WARNING "dsp56300: cannot apply ${MD_DSP56300_MEMORY_PATCH} to ${MD_DSP56300_DIR}; every emulated DSP keeps "
-                        "its 192 MB of wired memory (nothing else changes)")
-      endif()
+  if(NOT GIT_FOUND)
+    return()
+  endif()
+  file(STRINGS "${_patch}" _targets REGEX "^\\+\\+\\+ b/")
+  list(TRANSFORM _targets REPLACE "^\\+\\+\\+ b/" "${MD_DSP56300_DIR}/")
+  set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_patch}" ${_targets})
+  execute_process(COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn --reverse --check "${_patch}"
+                  WORKING_DIRECTORY "${MD_DSP56300_DIR}" RESULT_VARIABLE _applied OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _applied EQUAL 0)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --whitespace=nowarn "${_patch}"
+                    WORKING_DIRECTORY "${MD_DSP56300_DIR}" RESULT_VARIABLE _result OUTPUT_QUIET ERROR_QUIET)
+    if(_result EQUAL 0)
+      message(STATUS "dsp56300: applied ${_patch}")
+    else()
+      message(WARNING "dsp56300: cannot apply ${_patch} to ${MD_DSP56300_DIR}; ${_what}")
     endif()
   endif()
+endfunction()
+if(MD_DSP56300_PATCH)
+  _md_apply_dsp56300_patch("${MD_DSP56300_MEMORY_PATCH}" "every emulated DSP keeps its 192 MB of wired memory (nothing else changes)")
+  _md_apply_dsp56300_patch("${MD_DSP56300_MSVC_PATCH}" "the MSVC build of dsp.h fails (nothing else changes)")
 endif()
 
 if(NOT MD_USE_JIT)

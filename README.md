@@ -214,7 +214,7 @@ it (experimental: dsp56300 selects its aarch64 JIT for MSVC's `_M_ARM64`, but it
 | `MD_BUILD_TESTS` | `ON` | Build the unit tests. |
 | `MD_COPY_PLUGINS` | `ON` (`OFF` on Windows) | Copy the plugins to the user's plugin folders (`~/Library/Audio/Plug-Ins/`, `~/.vst3/`; the system VST3 folder on Windows) after each build. |
 | `MD_OS_SYX` | *(empty)* | Path to your OS file. Used by the tests and the command-line tools. |
-| `MD_USE_JIT` | `ON` | Run the emulated DSP on dsp56300's JIT. `OFF` uses its interpreter: the same audio, bit for bit, at about four times the CPU. The configure step applies `ext/patches/0001-dsp56300-md.patch` (JIT fixes) to the `ext/dsp56300` checkout, so that submodule shows as modified. |
+| `MD_USE_JIT` | `ON` | Run the emulated DSP on dsp56300's JIT. `OFF` uses its interpreter: the same audio, bit for bit, at about four times the CPU. The configure step applies `ext/patches/0001-dsp56300-md.patch` (JIT fixes), `0002` (memory) and `0003` (MSVC) to the `ext/dsp56300` checkout, so that submodule shows as modified. |
 | `MD_CODESIGN_IDENTITY` | `-` | What the plugin bundles are signed with after each build: `-` is ad-hoc (runs on this Mac only), or the name of a "Developer ID Application" certificate. See [Signing](#signing). |
 | `MD_CODESIGN_TIMESTAMP` | `none` | The signature's timestamp: `none` (offline), an empty value for Apple's server (notarization needs it), or a server URL. |
 | `MD_VERSION` | `0.1.0` | The version of the bundles and of the installer (`release/build_release.sh -v` sets it). |
