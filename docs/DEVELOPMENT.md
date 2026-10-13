@@ -182,7 +182,9 @@ why that submodule always shows as modified; `MD patch` markers in the source; o
 4. `jitops_alu_x64.cpp` (x86-64 only): LSL/LSR did not clear a stale Z (their CCR batch covered N, C and V but not Z).
    Found by lockstep under Rosetta (increment 0018); tests `jit_lsl_after_zero_clears_z` / `jit_lsr_after_zero_clears_z`.
 
-These are upstream bugs (dsp56300/dsp56300) and affect Monomodule too; they have not been reported upstream yet.
+These are upstream bugs (dsp56300/dsp56300) and affect Monomodule too; they have not been reported upstream yet. The
+other two patches in `ext/patches` change no emulation: `0002-dsp56300-md-memory.patch` (no `mlock`, increment 0009) and
+`0003-dsp56300-md-msvc.patch` (builds with MSVC, increment 0021), both applied by `src/core/CMakeLists.txt`.
 
 ### The x64 back end (increment 0010: first runs, under Rosetta 2)
 
@@ -200,14 +202,15 @@ test command. OS 1.63:
   (P:$1038c0 to $1038ca, instruction 5596681) `sr jit=80044 interp=80040`, i.e. Z is set on the x64 JIT. The block is a
   `DO #$22` loop in one machine's set-up code: per iteration two table words are loaded and each is shifted left by 12
   with LSL; all other registers agree and the last shifted values are not zero, so Z should be clear. Cause: `alu_lsl`
-  and `alu_lsr` in `jitops_alu_x64.cpp` (lines 144 and 168 of the patched file) open a `CcrBatchUpdate(N | C | V)`, which
-  clears those bits up front and switches `ccr_update()` to OR-only, but both set Z with `ccr_update_ifZero(CCRB_Z)`:
-  a Z = 1 from an earlier zero word is never cleared by a later non-zero result. With `CCR_Z` added to both masks
-  the x86_64 lockstep runs through the whole golden pattern without a difference (hash unchanged), and
-  `MD_SWEEP=1 MD_JIT_LOCKSTEP=1` over all 135 machines prints exactly the arm64 sweep with no lockstep report. To do:
-  put the two-line change into `ext/patches/0001-dsp56300-md.patch` and add a case to `tests/test_jit.cpp` (LSL and LSR
-  of zero, then of a non-zero value, JIT against interpreter; it fails on x64 without the fix, passes on arm64
-  either way), then run it under Rosetta. The golden hash was never affected (the voice program does not read Z there).
+  and `alu_lsr` in `jitops_alu_x64.cpp` (lines 144 and 168 of the patched file) open a `CcrBatchUpdate(N | C | V)`,
+  which clears those bits up front and switches `ccr_update()` to OR-only, but both set Z with
+  `ccr_update_ifZero(CCRB_Z)`: a Z = 1 from an earlier zero word is never cleared by a later non-zero result. With
+  `CCR_Z` added to both masks the x86_64 lockstep runs through the whole golden pattern without a difference (hash
+  unchanged), and `MD_SWEEP=1 MD_JIT_LOCKSTEP=1` over all 135 machines prints exactly the arm64 sweep with no lockstep
+  report. Done in increment 0018: the two-line change is fix 4 of `ext/patches/0001-dsp56300-md.patch`, with two cases
+  in `tests/test_jit.cpp` (LSL and LSR of zero, then of a non-zero value, JIT against interpreter; they fail on x64
+  without the fix, pass on arm64 either way), run under Rosetta. The golden hash was never affected (the voice program
+  does not read Z there).
 - **Finding 2 (crashes) was not the JIT, nor x64, nor Rosetta: the plugin checks cannot run twice at once.** The first
   full Rosetta ctest run, made while other sessions were using the Mac, died with SIGSEGV in plugin-render and
   plugin-state, and 8 parallel copies crashed `--check-render` in 21 of 24 runs. The same 8 parallel loops crash the
@@ -215,20 +218,22 @@ test command. OS 1.63:
   alike. Cause: every check keeps its settings in a fixed folder (`md-plugin-check-render`, `-state`, ... under JUCE's
   temp directory, `~/Library/Caches/<executable name>` on macOS) and deletes it at the start and the end, so two runs
   delete each other's OS-file setting; `render` then reports "no engine: No Machinedrum OS file selected" and
-  `checkRender` goes on to read the first channel of an empty result (null dereference; lldb on the native build
-  stopped in `checkRender`). Eight parallel loops with each its own copy of the executable (so its own folder): 48 of 48
-  pass. A user's real settings are never touched (`MD_SETTINGS_DIR`). Fixed in increment 0020: every check run keeps
-  its settings in a folder of its own (`mkdtemp` in that temp directory, removed when the check returns), and a check
-  without an engine fails with a message and exit code 1 instead of reading an empty render. The same 8 parallel
-  loops now pass 24 of 24 for `--check-render` and for `--check-state` (`tests/stress_checks.sh`).
+  `checkRender` goes on to read the first channel of an empty result (null dereference; lldb on the native build stopped
+  in `checkRender`). Eight parallel loops with each its own copy of the executable (so its own folder): 48 of 48 pass. A
+  user's real settings are never touched (`MD_SETTINGS_DIR`). Fixed in increment 0020: every check run keeps its
+  settings in a folder of its own (a new, randomly named one in that temp directory, `mkdtemp` until increment 0021;
+  removed when the check returns), and a check without an engine fails with a message and exit code 1 instead of reading
+  an empty render. The same 8 parallel loops now pass 24 of 24 for `--check-render` and for `--check-state`
+  (`tests/stress_checks.sh`).
 - **Caution.** Attaching lldb to the x86_64 slice hung (0 % CPU, debugserver under Rosetta); after it was killed
   Rosetta stopped starting binaries it had not seen before (a freshly compiled hello world too: processes stuck in
   the kernel at exec, state U, which `kill -9` does not end). It cleared by itself after about 40 minutes; whether the
   lldb session caused it is not known. Native lldb on arm64 is fine.
 
-So the repo's x86_64 slice is still opt-in (the release script builds arm64 unless told `-a universal`, the README says
-so): the Z fix is in the patch and verified under Rosetta (the tests fail without it, the lockstep render is clean), but
-there has been no Intel hardware. Once a real Intel Mac has run the full ctest, the universal build can become the default.
+So the repo's x86_64 slice is still opt-in for the installer (the release script builds arm64 unless told
+`-a universal`, the README says so; CI's macOS zip for beta testers is universal since increment 0021): the Z fix is in
+the patch and verified under Rosetta (the tests fail without it, the lockstep render is clean), but there has been no
+Intel hardware. Once a real Intel Mac has run the full ctest, the universal build can become the default.
 
 ## Linux and Windows (increment 0021, 2026-10-12)
 
@@ -237,9 +242,10 @@ Target architectures: arm64 (Apple Silicon, Linux aarch64, Windows on ARM as an 
 Linux, Windows 10 1803+). 32-bit ARM would be interpreter-only (dsp56300 has no A32 JIT; the MPC port used a static
 recompiler we left behind) and anything else has no JIT back end at all: out of scope.
 
-- **Nothing in the engine is platform-specific.** The only platform code was in the development tools: the allocation
-  counter (`malloc_logger`, Apple only, still so) and `md-plugin-check`'s settings folder (`mkdtemp`/`setenv`, now a
-  JUCE random folder and `_putenv_s` on Windows; `AllocCounter.cpp` uses `std::thread::id` and `_aligned_malloc`).
+- **Nothing in the engine is platform-specific** but one `memmem` (below). The other platform code was in the
+  development tools: the allocation counter (`malloc_logger`, Apple only, still so) and `md-plugin-check`'s settings
+  folder (`mkdtemp`/`setenv`, now a JUCE random folder and `_putenv_s` on Windows; `AllocCounter.cpp` uses
+  `std::thread::id` and `_aligned_malloc`).
 - **MSVC** (as Monomodule): `_USE_MATH_DEFINES NOMINMAX _CRT_SECURE_NO_WARNINGS`, `/utf-8 /bigobj`, a static C runtime
   (`CMAKE_MSVC_RUNTIME_LIBRARY`, policy CMP0091 defaulted NEW for dsp56300's sub-projects), and
   `/w /permissive- /constexpr:steps10000000` on the emulator libraries where the others get `-w`. `MD_OS_SYX` is passed
@@ -249,11 +255,14 @@ recompiler we left behind) and anything else has no JIT back end at all: out of 
   (needs the JIT entitlements under macOS's hardened runtime, nothing elsewhere). On Linux `/dev/shm` must hold the
   DSPs' memory: Docker needs `--shm-size=1g`. The x86-64 builds run the x64 back end with fix 4 of the patch; the
   aarch64 builds the back end every hash here was established with.
-- **MSVC found a second one, in the emulator fork:** `dsp.h`'s arm32 static-recompiler helpers (`callInstruction`,
-  `getRecompInfo`, the MPC port's work, unused here) rebuild a member pointer by copying an Itanium `{ptr, adjustment}`
-  pair into it and asserted that layout; MSVC's member pointer to a class without bases is one pointer, so every file
-  including `dsp.h` failed (`error C2338`). `ext/patches/0003-dsp56300-md-msvc.patch` copies `sizeof(member pointer)`
-  bytes instead, right on both ABIs; `src/core/CMakeLists.txt` applies it at configure time as it applies 0002.
+- **What the Windows CI runs found.** In the emulator fork, `dsp.h`'s arm32 static-recompiler helpers
+  (`callInstruction`, `getRecompInfo`, the MPC port's work, unused here) rebuild a member pointer by copying an Itanium
+  `{ptr, adjustment}` pair into it and asserted that layout; MSVC's member pointer to a class without bases is one
+  pointer, so every file including `dsp.h` failed (`error C2338`). `ext/patches/0003-dsp56300-md-msvc.patch` copies
+  `sizeof(member pointer)` bytes instead, right on both ABIs; `src/core/CMakeLists.txt` applies it at configure time as
+  it applies 0002. Then `MachineRunner.cpp` found the OS's machine table with `memmem`, which MSVC's C runtime does not
+  have (`std::search` now), and `Check.cpp` used a `constexpr` local in lambdas without capturing it, which MSVC rejects
+  (`static constexpr` now).
 - **The `windows-11-arm` runner image moved to Visual Studio 2026** in September 2026 (actions/runner-images#14602), so
   that job uses CMake's "Visual Studio 18 2026" generator; `windows-2022` keeps Visual Studio 2022.
 - **CI** (`.github/workflows/build.yml`): macos-14 universal, ubuntu-24.04, ubuntu-24.04-arm, windows-2022 (x64),
@@ -268,10 +277,12 @@ recompiler we left behind) and anything else has no JIT back end at all: out of 
   got the directory silently read the wrong header too. Now only the checkout's parent is on the path
   (`mc68k/mc68k.h`, `mc68k/Musashi/m68k.h`), and 68kEmu is a private dependency of mdcore (only `MachineRunner.cpp`
   includes it).
-- **Verified:** macOS arm64 builds, 16/16 tests with the OS and kit files, `md-hash` `04ef1db4fe767721`, the staging
-  zip complete; Linux aarch64 in an Ubuntu 24.04 container (GCC 13.3, Docker on this Mac) the same suite; on CI the
-  macOS universal, Linux x64 and Linux arm64 jobs pass. Windows compiles only on CI; the two fixes above came out of its
-  first run, and the next push shows whether MSVC has more to say.
+- **Verified:** macOS arm64 builds, 16/16 tests with the OS and kit files, `md-hash` `04ef1db4fe767721`, the staging zip
+  complete; Linux aarch64 in an Ubuntu 24.04 container (GCC 13.3, Docker on this Mac) 15/16 (`plugin-rt` skips: its
+  malloc hook is macOS-only), `md-hash` `04ef1db4fe767721`; on CI the macOS universal, Linux x64 and Linux arm64 jobs
+  pass. Windows compiles only on CI, one fix per run (patch 0003 and the arm64 job's generator, then `memmem`, then the
+  `Check.cpp` capture); on the run of `cee216d` both Windows jobs built the VST3, the standalone, `md-hash` and every
+  test executable. Whether Windows x64 passes its tests is still open (0021).
 
 ## Decisions (made, not to be re-litigated without a reason)
 
@@ -312,7 +323,7 @@ recompiler we left behind) and anything else has no JIT back end at all: out of 
   artwork reader trusts the OS 1.63 addresses only after checking the ColdFire section's size and hash.
 - **The processor must never take the engine lock from the message thread for display** (the old status line did, and
   the audio thread dropped blocks); the editor reads atomics.
-- **Packaging:** releases are arm64 until the x64 JIT has run on real Intel hardware (the universal build exists and is opt-in; its JIT is fixed and lockstep-clean under Rosetta). The build
+- **Packaging:** the installer and its zip (`release/build_release.sh`) are arm64 until the x64 JIT has run on real Intel hardware (the universal build exists and is opt-in; its JIT is fixed and lockstep-clean under Rosetta); CI's macOS zip, for beta testers, is universal. The build
   signs the bundles itself (hardened runtime; the JIT entitlements only stick to the standalone app, plugins run on their
   host's), the installer installs system-wide (AU, VST3, app), and the `.zip` is made after notarization and stapling.
 - **Voice budget, silence release and voice-group splitting stay off** (not hardware behaviour, or not bit-exact).
@@ -345,17 +356,18 @@ verification of their claims.
   build, runs the tests that need no OS file, and writes `dist/Moduledrum-<v>-macos-<arch>.pkg` (AU and VST3 to
   /Library/Audio/Plug-Ins, the app to /Applications) and a `.zip` of the three bundles; `-n` notarizes and staples
   (needs the owner's Developer ID certificates and a `notarytool` keychain profile, untested here);
-  `.github/workflows/build.yml` builds and tests on an Apple Silicon runner and uploads the bundles; the README has
-  "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed build. Left: an Intel-hardware run before
-  the default release becomes universal, loading the packaged build in a DAW, and the owner's certificates.
-  `auval -oop` passes too (increment 0019, the machine parameters' meta flag; checked on a scratch copy under another id).
+  `.github/workflows/build.yml` builds and tests on macOS (universal), Linux and Windows and uploads one zip per
+  platform (increment 0021); the README has "Installing a release". `auval -v aumu Mdo1 Mdrm` passes on the signed
+  build. Left: an Intel-hardware run before the default release becomes universal, loading the packaged build in a DAW,
+  and the owner's certificates. `auval -oop` passes too (increment 0019, the machine parameters' meta flag; checked on a
+  scratch copy under another id).
 - **After 0009 (master effects, done and archived)**, optional: the idle skip of the master pass (it runs every block:
   echo and reverb feedback, a free-running modulation phase) belongs with 0013; a C++ translation (B, with
   `tests/Dsp1Reference` as the oracle) only if RAM or CPU ever ask for it; the control machines (CTR-RE/GB/EQ/DX, which
   drive the master parameters from a track) are not modelled; the x64 JIT has never run DSP1's program.
-- **0021 Linux and Windows** (in progress): the code, CI matrix, staging script and tester guide are in; left is the
-  first CI run on a push, a Windows 10 x86-64 tester's `md-hash` report, and then flipping `build_release.sh -a` to
-  universal (0018).
+- **0021 Linux and Windows** (in progress): the code, CI matrix, staging script and tester guide are in, and macOS and
+  Linux pass on CI; left is Windows x64 passing its tests on CI and uploading its zip, a Windows 10 x86-64 tester's
+  `md-hash` report, and then flipping `build_release.sh -a` to universal (0018).
 - **0006 ROM machines and factory kits** need a flash image from a real Machinedrum UW; the MPC port's `tools/mdkits`
   shows how to extract the sample memory and the 16 factory kits by booting the emulated machine.
 - Not modelled at all: the sequencer (patterns, songs, parameter locks, trigger groups), audio input (INP machines),

@@ -29,7 +29,7 @@ Monomodule's `src/core/dsp/DspEngine.cpp`, and `Firmware.{h,cpp}` from Monomodul
 | Project | Used for | Licence |
 |---|---|---|
 | [JUCE](https://github.com/juce-framework/JUCE) 8.0.9, © Raw Material Software Limited | plugin formats, UI, audio and MIDI I/O | GNU AGPL v3 (JUCE is dual-licensed: AGPLv3 or the commercial JUCE licence; Moduledrum uses it under the AGPLv3) |
-| [dsp56300](https://github.com/dsp56300/dsp56300), © the dsp56300 authors; sd88me's fork [sd88me/dsp56300](https://github.com/sd88me/dsp56300) at `26558e5401fa134a013eca8dbb8c5ecde837ec55` (`ext/dsp56300`), with Moduledrum's patch `ext/patches/0001-dsp56300-md.patch` | Motorola DSP56300 emulator that runs the Machinedrum's voice DSP program | GNU GPL v3 |
+| [dsp56300](https://github.com/dsp56300/dsp56300), © the dsp56300 authors; sd88me's fork [sd88me/dsp56300](https://github.com/sd88me/dsp56300) at `26558e5401fa134a013eca8dbb8c5ecde837ec55` (`ext/dsp56300`), with Moduledrum's patches `ext/patches/0001-dsp56300-md.patch`, `0002-dsp56300-md-memory.patch` and `0003-dsp56300-md-msvc.patch` | Motorola DSP56300 emulator that runs the Machinedrum's voice DSP program | GNU GPL v3 |
 | [AsmJit](https://github.com/asmjit/asmjit), © the AsmJit authors (dsp56300's `source/asmjit` submodule) | JIT back end of dsp56300 (the emulated DSP runs on the JIT unless built with `MD_USE_JIT=OFF`) | zlib |
 | mc68k, [gearmulator](https://github.com/dsp56300/gearmulator)'s 68k emulator wrapper, © the dsp56300/gearmulator authors; joelanders' fork [joelanders/mc68k-md-mm](https://github.com/joelanders/mc68k-md-mm) at `ace95b3d0a5a332db147244762dda65f9a010b9f` (`ext/mc68k`) | runs the Machinedrum OS's own machine functions (ColdFire code) | GNU GPL v3 (its `LICENSE.md`) |
 | [Musashi](https://github.com/kstenerud/Musashi), © Karl Stenerud (inside mc68k, `Musashi/`) | the 68000-family CPU core | MIT |
@@ -43,8 +43,9 @@ The GNU GPL v3 and the GNU AGPL v3 may be combined (section 13 of each), and the
 the AGPL v3.
 
 The sd88me dsp56300 fork already contains Monomodule's dsp56300 patch (saturation mode, MPYRI/PFLUSH, JIT fixes; marked
-`MNM patch` in its source). Moduledrum adds three JIT fixes of its own (`ext/patches/0001-dsp56300-md.patch`, marked
-`MD patch`, applied to the checkout at configure time; GPLv3 like the code they change).
+`MNM patch` in its source). Moduledrum adds four JIT fixes of its own (`ext/patches/0001-dsp56300-md.patch`), a memory fix
+(`0002-dsp56300-md-memory.patch`, no `mlock` of the DSP's memory) and an MSVC build fix (`0003-dsp56300-md-msvc.patch`),
+all marked `MD patch` and applied to the checkout at configure time; GPLv3 like the code they change.
 
 ## Elektron
 

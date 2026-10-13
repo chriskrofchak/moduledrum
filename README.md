@@ -1,9 +1,10 @@
 # Moduledrum
 
 **Moduledrum** is a free, open-source, chip-level emulation of the Elektron Machinedrum SPS-1 UW as AU, VST3 and
-standalone plugins for macOS. Like [Monomodule](https://github.com/shnolk/monomodule) does for the Monomachine, it
-doesn't approximate the drum machine with new DSP code. It runs the Machinedrum's own voice DSP program in an emulated
-Motorola DSP56300 and the OS's own machine code in an emulated ColdFire, on the engine of sd88me's
+standalone plugins for macOS (VST3 and standalone on Windows and Linux, in beta). Like
+[Monomodule](https://github.com/shnolk/monomodule) does for the Monomachine, it doesn't approximate the drum machine
+with new DSP code. It runs the Machinedrum's own voice DSP program in an emulated Motorola DSP56300 and the OS's own
+machine code in an emulated ColdFire, on the engine of sd88me's
 [Machinemodule for MPC OS](https://github.com/sd88me/mpc-vst-machinedrum).
 
 <p align="center">
@@ -73,9 +74,10 @@ Contrast, Green, Amber and Blue LCD) and a custom pair of colours, shared by eve
   MFRQ FB FILTF FILTW MONO LEV), REV (gate box reverb: DVOL PRED DEC DAMP HP LP GATE LEV), EQ (LF LG HF HG PF PG PQ
   GAIN) and DYN (dynamix: ATCK REL TRHD RTIO KNEE HP OUTG MIX). A kit brings its own settings; turning a knob glides to
   the new value as the hardware does. The pages say OFF while MASTER is off.
-- **Kits:** every `.syx` in `~/Library/Application Support/Moduledrum/Machinedrum/kits/` is a bank of kits (free slots
-  are hidden); click a bank, then a kit to load it. Drop a `.syx` (a kit dump from C6, Transfer or an MD backup) anywhere
-  on the editor to copy it there. FOLDER opens the folder; the browser notices files added or changed there.
+- **Kits:** every `.syx` in the kit folder (`~/Library/Application Support/Moduledrum/Machinedrum/kits/` on macOS, see
+  [Settings and data](#settings-and-data)) is a bank of kits (free slots are hidden); click a bank, then a kit to load
+  it. Drop a `.syx` (a kit dump from C6, Transfer or an MD backup) anywhere on the editor to copy it there. FOLDER opens
+  the folder; the browser notices files added or changed there.
 
 ## Getting the OS file
 
@@ -96,7 +98,7 @@ GitHub Actions). One zip per platform, each with `VST3/`, `Standalone/`, `Tools/
 
 | Platform | Download | Plugins go to |
 |---|---|---|
-| macOS 12+ (Apple Silicon and Intel) | `Moduledrum-<version>-macos-universal.zip`, or the installer below | `~/Library/Audio/Plug-Ins/Components/` and `.../VST3/` |
+| macOS 12+ (Apple Silicon and Intel) | `Moduledrum-<version>-macos-universal.zip`, or the `.pkg` installer below | `~/Library/Audio/Plug-Ins/Components/` and `.../VST3/` |
 | Windows 10 (1803+) and 11, x64 | `Moduledrum-<version>-windows-x64.zip` | `C:\Program Files\Common Files\VST3\` |
 | Windows 11 on ARM (experimental) | `Moduledrum-<version>-windows-arm64.zip` | the same |
 | Linux x64 and arm64 | `Moduledrum-<version>-linux-x64.zip`, `-linux-arm64.zip` | `~/.vst3/` |
@@ -105,8 +107,9 @@ There is no AU on Windows or Linux (Audio Units are macOS only), and no Windows 
 yet: SmartScreen warns on the first start of the standalone or `md-hash` (*More info*, *Run anyway*). On Linux the
 emulator keeps the DSPs' memory in `/dev/shm`; a Docker container needs `--shm-size=1g`.
 
-On macOS, `release/build_release.sh` (see [Making a release](#making-a-release)) also makes the two macOS downloads of
-a release. Both hold the same three bundles:
+The macOS zip from CI is ad-hoc signed and not notarized. `release/build_release.sh` (see
+[Making a release](#making-a-release)), run on a Mac, makes the other two macOS downloads of a release, signed and
+notarized when it is given the certificates. Both hold the same three bundles (no `Tools/md-hash`):
 
 - **`Moduledrum-<version>-macos-arm64.pkg`**, the installer. Open it, click through, and use *Customize* to leave out
   what you don't want. It installs for all users:
@@ -124,10 +127,11 @@ a release. Both hold the same three bundles:
 Then rescan the plugins in your host (Logic scans Audio Units at launch) and
 [select your OS file](#getting-the-os-file) the first time Moduledrum opens. Nothing of Elektron's is in either file.
 
-**Intel, Windows and Linux are in beta.** The macOS zip and the installer made with `-a universal` carry an Intel
-(x86_64) slice, and the Windows and Linux x64 zips run the same x86-64 JIT back end, which has only run under Rosetta
-so far (see [Known limitations](#known-limitations)). Every zip has `Tools/md-hash`, whose one-line output says whether
-the emulation is exact on your machine: [docs/BETA-TESTING.md](docs/BETA-TESTING.md).
+**Intel, Windows and Linux are in beta.** The `macos-universal` zip and an installer made with `-a universal` carry an
+Intel (x86_64) slice, and the Windows and Linux x64 zips run the same x86-64 JIT back end, which has run the
+Machinedrum's program only under Rosetta so far (see [Known limitations](#known-limitations)). Every CI zip has
+`Tools/md-hash`, whose one-line output says whether the emulation is exact on your machine:
+[docs/BETA-TESTING.md](docs/BETA-TESTING.md).
 
 **Gatekeeper.** A release that is signed with a Developer ID certificate and notarized opens without questions. One
 that is not (a build you made yourself, or a release published ad-hoc signed) is blocked while it carries the
@@ -204,7 +208,8 @@ The VST3 is `build\src\plugin\MdOne_artefacts\Release\VST3\Moduledrum.vst3`: cop
 `C:\Program Files\Common Files\VST3\`, or configure with `-DMD_COPY_PLUGINS=ON` from an administrator prompt. The
 standalone is `...\Standalone\Moduledrum.exe`, `md-hash` is `build\src\cli\Release\md-hash.exe`. The C runtime is
 linked statically, so nothing needs the Visual C++ redistributable. `-A ARM64` on a Windows-on-ARM machine builds for
-it (experimental: dsp56300 selects its aarch64 JIT for MSVC's `_M_ARM64`, but it has not been run there).
+it (experimental: dsp56300 selects its aarch64 JIT for MSVC's `_M_ARM64`; CI builds it with Visual Studio 2026,
+`-G "Visual Studio 18 2026"`, but nobody has run it with the OS file).
 
 ### Build options
 
@@ -247,9 +252,9 @@ cmake -S . -B build-universal -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_AR
 
 builds the plugins, the standalone app and the command-line tools for both architectures (dsp56300 and asmjit select
 their JIT back end by compiler macro, so one configure is enough; `lipo -archs` shows both). **The x86_64 slice is not
-trusted yet:** run under Rosetta, its `md-hash` and all ten tests are right, but the JIT lockstep check finds the x64 JIT
-leaving the Z flag set after an LSL loop (a two-line fix is known and still has to go into `ext/patches`; details in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), and no Intel Mac has run it. Treat it as experimental. To run
+trusted yet:** run under Rosetta, its `md-hash` and the tests are right, and the JIT lockstep check is clean since the
+x64 JIT's Z-flag bug after LSL/LSR was fixed (fix 4 of `ext/patches/0001-dsp56300-md.patch`; details in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), but no Intel Mac has run it. Treat it as experimental. To run
 the tests of the x86_64 slice on Apple Silicon (an arm64 CMake's `ctest` cannot be started with `arch -x86_64`), let
 CMake start every test through Rosetta:
 
@@ -285,14 +290,14 @@ export MD_INSTALLER_IDENTITY="Developer ID Installer: Your Name (TEAMID)"
 release/build_release.sh -v 0.1.0 -s "Developer ID Application: Your Name (TEAMID)" -n
 ```
 
-`-n` signs with Apple's timestamp, submits the installer with `notarytool submit --wait`, staples the ticket to it
-and to the three bundles, and only then writes the `.zip`. `MD_CMAKE_ARGS` adds arguments to the configure step (for
-example `-DFETCHCONTENT_SOURCE_DIR_JUCE=<a JUCE 8.0.9 checkout>`). Nothing derived from the OS file is ever packaged:
-the plugin asks for it at run time. GitHub Actions (`.github/workflows/build.yml`) builds and tests every push on
-macOS (universal), Linux (x64 and arm64) and Windows (x64; arm64 as an experiment) and uploads one zip per platform,
-made by `cmake/stage_release.cmake` (the plugins, the standalone, `md-hash` and the licence files; the same script
-works locally: `cmake -DBUILD_DIR=build -DOUT_DIR=dist -DPLATFORM=linux -P cmake/stage_release.cmake`). The tests
-that need the OS file are skipped there. A `v*` tag attaches the zips to a draft release.
+`-n` signs with Apple's timestamp, submits the installer with `notarytool submit --wait`, staples the ticket to it and
+to the three bundles, and only then writes the `.zip`. `MD_CMAKE_ARGS` adds arguments to the configure step (for example
+`-DFETCHCONTENT_SOURCE_DIR_JUCE=<a JUCE 8.0.9 checkout>`). Nothing derived from the OS file is ever packaged: the plugin
+asks for it at run time. GitHub Actions (`.github/workflows/build.yml`) builds and tests every push to `main` and every
+pull request on macOS (universal), Linux (x64 and arm64) and Windows (x64; arm64 as an experiment) and uploads one zip
+per platform, made by `cmake/stage_release.cmake` (the plugins, the standalone, `md-hash` and the licence files; the
+same script works locally: `cmake -DBUILD_DIR=build -DOUT_DIR=dist -DPLATFORM=linux -P cmake/stage_release.cmake`). The
+tests that need the OS file are skipped there. A `v*` tag attaches the zips to a draft release.
 
 ### Tests
 
@@ -354,13 +359,15 @@ The engine in `src/core/md` is sd88me's, vendored from Machinemodule for MPC OS
 - **x86-64 is in beta.** Apple Silicon (and Linux aarch64) run the aarch64 JIT back end, the one every hash above
   was established with. Intel Macs, Windows x64 and Linux x64 run dsp56300's x64 back end, which has had one bug fixed
   by this project (fix 4 of `ext/patches/0001-dsp56300-md.patch`, found in lockstep under Rosetta) and has not yet
-  run on a real x86-64 machine. `Tools/md-hash` in every download answers that in one line
+  run the Machinedrum's program on a real x86-64 machine (CI's x64 runners have no OS file: they run only the tests that
+  need none, `jit` among them). `Tools/md-hash` in every CI zip answers that in one line
   ([docs/BETA-TESTING.md](docs/BETA-TESTING.md)); 32-bit ARM and other architectures have no JIT and are out of scope.
 
 ## Settings and data
 
-Moduledrum keeps its settings and kit folder in `~/Library/Application Support/Moduledrum/Machinedrum/`
-(`settings.xml` and `kits/`).
+Moduledrum keeps its settings and kit folder (`settings.xml` and `kits/`) in
+`~/Library/Application Support/Moduledrum/Machinedrum/` on macOS, `~/.config/Moduledrum/Machinedrum/` on Linux
+(`$XDG_CONFIG_HOME` if set) and `%APPDATA%\Moduledrum\Machinedrum\` on Windows.
 
 ## Development
 

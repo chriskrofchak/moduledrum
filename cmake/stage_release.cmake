@@ -7,7 +7,8 @@
 #
 # The plugins must already be built (Release). ARCH defaults to the build machine's; the version is MD_VERSION in
 # CMakeLists.txt. The zip holds VST3/, Standalone/, AU/ (macOS only), Tools/md-hash (the bit-exactness check every beta
-# tester runs with their own OS file, see docs/BETA-TESTING.md) and the licence files. Nothing from the OS file is in it.
+# tester runs with their own OS file, see docs/BETA-TESTING.md), the licence files, README.md and BETA-TESTING.md. Nothing
+# from the OS file is in it.
 foreach(v BUILD_DIR OUT_DIR PLATFORM)
   if(NOT ${v})
     message(FATAL_ERROR "stage_release: -D${v}=... is required")

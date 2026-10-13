@@ -33,7 +33,8 @@ Unzip the download. Inside:
 | `Tools/md-hash` | the exactness check (below) | anywhere |
 
 Then start your DAW and let it rescan plugins (Logic scans Audio Units when it starts). The first time Moduledrum
-opens it asks for the OS file: choose the `.syx` you unzipped. You do this once; every instance shares the setting.
+opens it says *No OS file*: open **MENU** (top right), choose *Select OS File...* and pick the `.syx` you unzipped (or
+drop the `.syx` on the window). You do this once; every instance shares the setting.
 
 **macOS:** a beta is not notarized, so the first launch is blocked by Gatekeeper. Right-click the app and choose
 *Open*, or run this on the unzipped folder:
@@ -51,9 +52,9 @@ start it with `--shm-size=1g`.
 ## The one check that matters: `md-hash`
 
 Moduledrum runs the Machinedrum's DSP program on an emulator that compiles DSP code to your CPU's instructions as it
-runs (a JIT). That compiler has a back end for Apple Silicon and ARM, which we have verified exhaustively, and one
-for Intel and AMD (x86-64), which has so far only run inside Rosetta on a Mac. **If you are on an Intel or AMD
-machine, this check is the most useful thing you can do.**
+runs (a JIT). That compiler has a back end for Apple Silicon and ARM, which we have verified exhaustively on macOS and
+Linux, and one for Intel and AMD (x86-64), which has so far run the Machinedrum's program only inside Rosetta on a Mac.
+**If you are on an Intel or AMD machine, this check is the most useful thing you can do.**
 
 `md-hash` renders 12 seconds of a fixed pattern through every track and effect and prints a hash of the audio. The
 right answer, the same on every platform, is:
@@ -83,8 +84,17 @@ interpreter side by side and reports the first instruction where they disagree, 
 MD_JIT_LOCKSTEP=1 Tools/md-hash /path/to/Elektron_SPS1-1UW_OS1.63.syx
 ```
 
+Command Prompt:
+
 ```
 set MD_JIT_LOCKSTEP=1
+Tools\md-hash.exe C:\path\to\Elektron_SPS1-1UW_OS1.63.syx
+```
+
+PowerShell:
+
+```
+$env:MD_JIT_LOCKSTEP = "1"
 Tools\md-hash.exe C:\path\to\Elektron_SPS1-1UW_OS1.63.syx
 ```
 

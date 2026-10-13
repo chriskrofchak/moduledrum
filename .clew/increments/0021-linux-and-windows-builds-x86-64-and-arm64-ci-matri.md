@@ -53,9 +53,11 @@ a Windows installer (a zip is enough for the beta; Inno Setup later), Authentico
 - [ ] Then: an Intel Mac or Linux x64 report closes 0018's "real hardware" task; flip build_release.sh -a to universal
 
 ## Done so far (2026-10-12, evening)
-Code: `CMakeLists.txt` (MSVC block, MD_OS_SYX path), `cmake/dsp56300.cmake` and `cmake/mc68k.cmake` (MSVC warning flags),
-`src/plugin/Check.cpp` (portable settings folder and env), `src/plugin/AllocCounter.cpp` (std::thread::id, _aligned_malloc).
-New: `cmake/stage_release.cmake`, `docs/BETA-TESTING.md`; `.github/workflows/build.yml` is the five-job matrix. Docs: README
-(installing per platform, Linux and Windows build sections, options, CI, known limitations), DEVELOPMENT.md (a section and
-the open-work entry). Windows and Linux compile only on CI so far: the first push shows whether the vendored engine and the
-mc68k fork take MSVC and GCC as Monomodule's do (the grep for GCC-only constructs found none).
+Code: `CMakeLists.txt` (MSVC block, MD_OS_SYX path), `cmake/dsp56300.cmake` and `cmake/mc68k.cmake` (MSVC warning flags;
+mc68k's checkout off the include path), `src/core/CMakeLists.txt` (68kEmu private; patch 0003 applied with 0002 by one
+function), `src/core/md/MachineRunner.cpp` (`mc68k/Musashi/m68k.h`, std::search for memmem), `src/plugin/Check.cpp` (portable
+settings folder and env, a static constexpr), `src/plugin/AllocCounter.cpp` (std::thread::id, _aligned_malloc).
+New: `cmake/stage_release.cmake`, `docs/BETA-TESTING.md`, `ext/patches/0003-dsp56300-md-msvc.patch`;
+`.github/workflows/build.yml` is the five-job matrix. Docs: README (installing per platform, Linux and Windows build
+sections, options, CI, known limitations), DEVELOPMENT.md (a section and the open-work entry). Linux builds in Docker
+(aarch64) and on CI (x64, arm64); Windows compiles only on CI, and each run so far found one MSVC problem (tasks above).

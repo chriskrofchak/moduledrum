@@ -60,7 +60,8 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      # romart, firmware, golden-hash, kits, jit, resampler, master-*, plugin-* (the ones that need MD_OS_SYX skip themselves)
+      # romart, firmware, golden-hash, kits, jit, master, master-host, golden-master, master-ram, resampler, plugin-* (the ones
+      # that need MD_OS_SYX skip themselves)
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
