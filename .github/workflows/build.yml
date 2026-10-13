@@ -27,8 +27,10 @@ jobs:
           - { os: ubuntu-24.04-arm, platform: linux,   arch: arm64,     generator: Ninja,                    extra: '' }
           - { os: windows-2022,     platform: windows, arch: x64,       generator: 'Visual Studio 17 2022',  extra: '-A x64' }
           # Windows on ARM: JUCE supports it and dsp56300 selects its aarch64 JIT for MSVC's _M_ARM64, but nobody has built
-          # this emulator there yet
-          - { os: windows-11-arm,   platform: windows, arch: arm64,     generator: 'Visual Studio 17 2022',  extra: '-A ARM64', experimental: true }
+          # this emulator there yet. The windows-11-arm image moved to Visual Studio 2026 as its default in September 2026
+          # (actions/runner-images#14602), so it takes CMake's "Visual Studio 18 2026" generator; the x64 job stays on
+          # windows-2022 with Visual Studio 2022, which that image keeps
+          - { os: windows-11-arm,   platform: windows, arch: arm64,     generator: 'Visual Studio 18 2026',  extra: '-A ARM64', experimental: true }
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
     steps:
